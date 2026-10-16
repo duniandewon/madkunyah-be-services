@@ -3,15 +3,18 @@ package httpx
 import (
 	"encoding/json"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 )
 
 type ErrorBody struct {
-	Code    domain.ErrorCode  `json:"code"`
-	Message string            `json:"message"`
-	Fields  map[string]string `json:"fields,omitempty"`
+	Code       domain.ErrorCode  `json:"code"`
+	Message    string            `json:"message"`
+	Fields     map[string]string `json:"fields,omitempty"`
+	RetryAfter int               `json:"retry_after,omitempty"`
 }
 
 type errorEnvelope struct {
@@ -35,10 +38,10 @@ func NoContent(w http.ResponseWriter) { w.WriteHeader(http.StatusNoContent) }
 // errors and never choose a status themselves.
 func statusFor(code domain.ErrorCode) int {
 	switch code {
-	case domain.CodeInvalidInput:
+	case domain.CodeInvalidInput, domain.CodeInvalidIdentifier:
 		return http.StatusBadRequest
-	case domain.CodeUnauthorized, domain.CodeOTPInvalid, domain.CodeOTPExpired,
-		domain.CodeTokenReused:
+	case domain.CodeUnauthorized, domain.CodeOTPInvalid, domain.CodeTokenExpired,
+		domain.CodeTokenInvalid, domain.CodeSessionRevoked:
 		return http.StatusUnauthorized
 	case domain.CodeForbidden:
 		return http.StatusForbidden
@@ -46,8 +49,10 @@ func statusFor(code domain.ErrorCode) int {
 		return http.StatusNotFound
 	case domain.CodeConflict, domain.CodeShiftClosed:
 		return http.StatusConflict
-	case domain.CodeRateLimited, domain.CodeOTPTooManyRetries:
+	case domain.CodeRateLimited, domain.CodeOTPCooldown, domain.CodeOTPQuotaExceeded:
 		return http.StatusTooManyRequests
+	case domain.CodeAuthUnavailable:
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -73,9 +78,10 @@ func Error(w http.ResponseWriter, r *http.Request, err error) {
 		slog.ErrorContext(r.Context(), "server error",
 			"error", err, "code", de.Code, "path", r.URL.Path)
 	}
-	JSON(w, status, errorEnvelope{ErrorBody{
-		Code:    de.Code,
-		Message: de.Message,
-		Fields:  de.Fields,
-	}})
+	body := ErrorBody{Code: de.Code, Message: de.Message, Fields: de.Fields}
+	if de.RetryAfter > 0 {
+		body.RetryAfter = int(math.Ceil(de.RetryAfter.Seconds()))
+		w.Header().Set("Retry-After", strconv.Itoa(body.RetryAfter))
+	}
+	JSON(w, status, errorEnvelope{body})
 }

@@ -8,9 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/duniandewon/madkunyah-be-service/internal/auth"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
+	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/server"
+	"github.com/duniandewon/madkunyah-be-service/migrations"
+	"github.com/duniandewon/madkunyah-be-service/platform/notifier"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
 
 	credis "github.com/duniandewon/madkunyah-be-service/platform/redis"
@@ -43,6 +48,13 @@ func run() error {
 	}
 	defer db.Close()
 
+	if err := postgres.SetMigrations(migrations.FS, "."); err != nil {
+		return err
+	}
+	if err := db.Migrate(ctx); err != nil {
+		return err
+	}
+
 	// Redis holds refresh tokens and OTP state, so it is a hard dependency:
 	// without it nobody can authenticate. Run it with AOF persistence.
 	rdb, err := credis.Connect(ctx, credis.Config{
@@ -53,12 +65,29 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer rdb.Close()
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			slog.Error("close redis", "error", err)
+		}
+	}()
+
+	signer, err := auth.NewSigner(cfg.Auth.JWTPrivateKeyPEM, cfg.Auth.JWTPublicKeyPEM,
+		cfg.Auth.JWTPreviousPublicKeyPEM, cfg.Auth.Issuer, cfg.Auth.AccessTTL)
+	if err != nil {
+		return err
+	}
+	authSvc, dispatcher, err := newAuthService(cfg, db, rdb, signer)
+	if err != nil {
+		return err
+	}
+	defer dispatcher.Wait()
 
 	srv := server.New(server.Deps{
 		Config: cfg,
 		DB:     db,
 		Redis:  rdb,
+		Auth:   auth.NewHandler(authSvc, signer),
+		Tokens: signer,
 	})
 
 	errCh := make(chan error, 1)
@@ -86,6 +115,46 @@ func run() error {
 	}
 	slog.Info("shutdown complete")
 	return nil
+}
+
+func newAuthService(cfg *config.Config, db *postgres.DB, rdb *credis.Client, signer *auth.Signer) (*auth.Service, *auth.Dispatcher, error) {
+	loc, err := time.LoadLocation(cfg.OTP.QuotaTimezone)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The log notifier stands in until WhatsApp/SMTP are integrated. Codes are
+	// printed only in local development.
+	dispatcher := auth.NewDispatcher(notifier.NewLog(cfg.Env == "development"), rdb, cfg.OTP.DispatchRetryWindow)
+	repo := auth.NewRepository(db)
+
+	svc := auth.NewService(auth.Config{
+		Pepper:              []byte(cfg.OTP.Pepper),
+		OTPLength:           cfg.OTP.Length,
+		OTPTTL:              cfg.OTP.TTL,
+		Cooldown:            cfg.OTP.Cooldown,
+		MaxAttempts:         cfg.OTP.MaxAttempts,
+		DailyQuota:          cfg.OTP.DailyQuota,
+		IPHourlyQuota:       cfg.OTP.IPHourlyQuota,
+		VerifyIPHourlyQuota: cfg.OTP.VerifyIPHourlyQuota,
+		QuotaLocation:       loc,
+		RefreshTTL: map[domain.Audience]time.Duration{
+			domain.AudienceCustomer: cfg.Auth.CustomerRefreshTTL,
+			domain.AudienceStaff:    cfg.Auth.StaffRefreshTTL,
+			domain.AudiencePOS:      cfg.Auth.DeviceRefreshTTL,
+		},
+		RefreshGrace: cfg.Auth.RefreshGrace,
+	}, auth.Deps{
+		OTPs:       rdb,
+		Limiter:    rdb,
+		Sessions:   rdb,
+		Revoker:    rdb,
+		Subjects:   repo,
+		Profiles:   repo,
+		Events:     repo,
+		Dispatcher: dispatcher,
+		Signer:     signer,
+	})
+	return svc, dispatcher, nil
 }
 
 func setupLogging(cfg *config.Config) {

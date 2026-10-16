@@ -48,6 +48,16 @@ func Decode(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	return nil
 }
 
+// BearerToken returns the token from an "Authorization: Bearer" header, or ""
+// if there is none.
+func BearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if len(h) < 7 || !strings.EqualFold(h[:7], "bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(h[7:])
+}
+
 // ClientIP resolves the caller address for rate limiting. X-Forwarded-For is
 // trusted only because this service is expected to sit behind a proxy that
 // sets it; exposed directly, the header is attacker-controlled.

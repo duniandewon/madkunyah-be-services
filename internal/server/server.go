@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/duniandewon/madkunyah-be-service/internal/auth"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
+	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
 	"github.com/go-chi/chi/v5"
@@ -18,6 +20,8 @@ type Deps struct {
 	Config *config.Config
 	DB     *postgres.DB
 	Redis  *credis.Client
+	Auth   *auth.Handler
+	Tokens mw.TokenVerifier
 }
 
 func New(d Deps) *http.Server {
@@ -40,6 +44,34 @@ func Router(d Deps) http.Handler {
 
 	r.Get("/health", healthHandler())
 	r.Get("/ready", readyHandler(d))
+	r.Get("/.well-known/jwks.json", d.Auth.JWKS)
+
+	authn := func(auds ...domain.Audience) func(http.Handler) http.Handler {
+		return mw.Authenticate(d.Tokens, d.Redis, auds...)
+	}
+
+	r.Route("/v1", func(r chi.Router) {
+		r.Route("/auth", func(r chi.Router) {
+			r.Post("/otp/request", d.Auth.RequestOTP)
+			r.Post("/otp/verify", d.Auth.VerifyOTP)
+			r.Post("/token/refresh", d.Auth.Refresh)
+			r.Post("/logout", d.Auth.Logout)
+			// Self-service: acts only on the caller's own sessions, so it is
+			// the one route shared by both browser audiences.
+			r.With(authn(domain.AudienceCustomer, domain.AudienceStaff)).
+				Post("/sessions/revoke-all", d.Auth.RevokeAll)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(authn(domain.AudienceCustomer))
+			r.Get("/me", d.Auth.Me)
+		})
+
+		r.Route("/staff", func(r chi.Router) {
+			r.Use(authn(domain.AudienceStaff))
+			r.Get("/me", d.Auth.Me)
+		})
+	})
 
 	return r
 }

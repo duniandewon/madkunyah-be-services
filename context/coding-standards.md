@@ -42,7 +42,7 @@
 
 ## Database & Migrations
 
-- **Driver/Tooling**: Use the standard library `database/sql` package paired with a basic PostgreSQL driver (e.g., `github.com/lib/pq`). No ORMs, no `pgx`, and no `sqlc`.
+- **Driver/Tooling**: Use `pgx` (`pgxpool`) directly, via `platform/postgres`. No ORMs and no `sqlc`.
 
 - **Raw SQL**: Write raw SQL queries as constants or string literals directly within the repository layer.
 
@@ -50,7 +50,7 @@
 
 - **Scanning**: Manually map rows to Go structs using `rows.Scan()`. Use standard `sql.NullString`, `sql.NullInt64`, etc., when dealing with nullable database columns.
 
-- **Transactions**: For operations modifying multiple tables, pass down a context and explicitly manage database transactions (`*sql.Tx` with `BEGIN`, `COMMIT`, `ROLLBACK`) in the repository layer.
+- **Transactions**: For operations modifying multiple tables, pass down a context and run them inside `postgres.DB.InTx` (`pgx.Tx`) in the repository layer.
 
 ## HTTP Handlers & Routing
 

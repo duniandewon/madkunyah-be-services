@@ -45,25 +45,39 @@ type Auth struct {
 	// the ability to mint them.
 	JWTPrivateKeyPEM string
 	JWTPublicKeyPEM  string
-	Issuer           string
+	// JWTPreviousPublicKeyPEM is the retired verification key during a key
+	// rotation. Keep it set for at least twice the access-token lifetime so
+	// tokens signed before the switch still validate.
+	JWTPreviousPublicKeyPEM string
+	Issuer                  string
 
 	AccessTTL          time.Duration
 	CustomerRefreshTTL time.Duration
 	StaffRefreshTTL    time.Duration
 	DeviceRefreshTTL   time.Duration
+	// RefreshGrace lets a client that lost a refresh response retry with the
+	// old token and receive the same successor, instead of tripping reuse
+	// detection.
+	RefreshGrace time.Duration
 }
 
 type OTP struct {
 	// Pepper is the server-side HMAC key. Codes are never stored in plaintext:
 	// Redis snapshots and debug dumps would otherwise contain live credentials
 	// for the whole TTL window.
-	Pepper        string
-	Length        int
-	TTL           time.Duration
-	Cooldown      time.Duration
-	MaxAttempts   int
-	DailyQuota    int
-	IPHourlyQuota int
+	Pepper              string
+	Length              int
+	TTL                 time.Duration
+	Cooldown            time.Duration
+	MaxAttempts         int
+	DailyQuota          int
+	IPHourlyQuota       int
+	VerifyIPHourlyQuota int
+	// QuotaTimezone defines the calendar day the daily quota resets on.
+	QuotaTimezone string
+	// DispatchRetryWindow bounds notifier retries; it must stay well inside
+	// TTL so a late delivery is still usable.
+	DispatchRetryWindow time.Duration
 }
 
 func Load() (*Config, error) {
@@ -98,22 +112,27 @@ func Load() (*Config, error) {
 			DB:       intDef("REDIS_DB", 0),
 		},
 		Auth: Auth{
-			JWTPrivateKeyPEM:   req("JWT_PRIVATE_KEY"),
-			JWTPublicKeyPEM:    req("JWT_PUBLIC_KEY"),
-			Issuer:             def("JWT_ISSUER", "fnb-backend"),
-			AccessTTL:          durDef("ACCESS_TOKEN_TTL", 15*time.Minute),
-			CustomerRefreshTTL: durDef("CUSTOMER_REFRESH_TTL", 30*24*time.Hour),
-			StaffRefreshTTL:    durDef("STAFF_REFRESH_TTL", 12*time.Hour),
-			DeviceRefreshTTL:   durDef("DEVICE_REFRESH_TTL", 90*24*time.Hour),
+			JWTPrivateKeyPEM:        req("JWT_PRIVATE_KEY"),
+			JWTPublicKeyPEM:         req("JWT_PUBLIC_KEY"),
+			JWTPreviousPublicKeyPEM: os.Getenv("JWT_PREVIOUS_PUBLIC_KEY"),
+			Issuer:                  def("JWT_ISSUER", "fnb-backend"),
+			AccessTTL:               durDef("ACCESS_TOKEN_TTL", 15*time.Minute),
+			CustomerRefreshTTL:      durDef("CUSTOMER_REFRESH_TTL", 30*24*time.Hour),
+			StaffRefreshTTL:         durDef("STAFF_REFRESH_TTL", 12*time.Hour),
+			DeviceRefreshTTL:        durDef("DEVICE_REFRESH_TTL", 90*24*time.Hour),
+			RefreshGrace:            durDef("REFRESH_GRACE", 30*time.Second),
 		},
 		OTP: OTP{
-			Pepper:        req("OTP_PEPPER"),
-			Length:        intDef("OTP_LENGTH", 6),
-			TTL:           durDef("OTP_TTL", 5*time.Minute),
-			Cooldown:      durDef("OTP_COOLDOWN", 60*time.Second),
-			MaxAttempts:   intDef("OTP_MAX_ATTEMPTS", 5),
-			DailyQuota:    intDef("OTP_DAILY_QUOTA", 10),
-			IPHourlyQuota: intDef("OTP_IP_HOURLY_QUOTA", 20),
+			Pepper:              req("OTP_PEPPER"),
+			Length:              intDef("OTP_LENGTH", 6),
+			TTL:                 durDef("OTP_TTL", 5*time.Minute),
+			Cooldown:            durDef("OTP_COOLDOWN", 60*time.Second),
+			MaxAttempts:         intDef("OTP_MAX_ATTEMPTS", 5),
+			DailyQuota:          intDef("OTP_DAILY_QUOTA", 5),
+			IPHourlyQuota:       intDef("OTP_IP_HOURLY_QUOTA", 20),
+			VerifyIPHourlyQuota: intDef("OTP_VERIFY_IP_HOURLY_QUOTA", 30),
+			QuotaTimezone:       def("OTP_QUOTA_TIMEZONE", "Asia/Jakarta"),
+			DispatchRetryWindow: durDef("OTP_DISPATCH_RETRY_WINDOW", 2*time.Minute),
 		},
 	}
 
@@ -134,13 +153,6 @@ func def(key, fallback string) string {
 
 func intDef(key string, fallback int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
-		return v
-	}
-	return fallback
-}
-
-func boolDef(key string, fallback bool) bool {
-	if v, err := strconv.ParseBool(os.Getenv(key)); err == nil {
 		return v
 	}
 	return fallback

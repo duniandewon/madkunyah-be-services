@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Go backend for MadKunyah, a multi-outlet F&B business: one API serving the online shop, the in-store POS, and the owner dashboard. The full product spec (scope decisions, data model DDL, auth flow, order lifecycle, API surface, roadmap) is in `context/project-overview.md`. Read the relevant section of it before building any feature. The repo is at an early stage: only the HTTP skeleton, config, and Postgres/Redis connections exist so far.
+Go backend for MadKunyah, a multi-outlet F&B business: one API serving the online shop, the in-store POS, and the owner dashboard. The full product spec (scope decisions, data model DDL, auth flow, order lifecycle, API surface, roadmap) is in `context/project-overview.md`. Read the relevant section of it before building any feature. Built so far: HTTP skeleton, config, Postgres/Redis connections, embedded migrations (applied at startup from `migrations/`), and auth slice 1 (OTP login, JWT + rotating refresh sessions) in `internal/auth`.
 
 ## Context files
 
@@ -21,7 +21,7 @@ In order to have the full context of this project, make sure to always reference
 go run ./cmd/api              # run the API (needs Postgres + Redis reachable)
 go build -o bin/api ./cmd/api # build (bin/ is gitignored)
 go vet ./...
-go test ./...                 # no tests exist yet
+go test ./...                 # unit tests (no integration suite yet)
 go test ./internal/httpx -run TestName   # single test
 ```
 
