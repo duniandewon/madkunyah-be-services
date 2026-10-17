@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/auth"
+	"github.com/duniandewon/madkunyah-be-service/internal/authz"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/server"
+	"github.com/duniandewon/madkunyah-be-service/internal/staff"
 	"github.com/duniandewon/madkunyah-be-service/migrations"
 	"github.com/duniandewon/madkunyah-be-service/platform/notifier"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
@@ -82,12 +84,17 @@ func run() error {
 	}
 	defer dispatcher.Wait()
 
+	access := authz.NewResolver(db, rdb, cfg.Auth.AuthzCacheTTL)
+	staffSvc := staff.NewService(staff.NewRepository(db), access, rdb)
+
 	srv := server.New(server.Deps{
 		Config: cfg,
 		DB:     db,
 		Redis:  rdb,
 		Auth:   auth.NewHandler(authSvc, signer),
 		Tokens: signer,
+		Access: access,
+		Staff:  staff.NewHandler(staffSvc),
 	})
 
 	errCh := make(chan error, 1)

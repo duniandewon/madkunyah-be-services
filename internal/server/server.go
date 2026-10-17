@@ -9,6 +9,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
+	"github.com/duniandewon/madkunyah-be-service/internal/staff"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
 	"github.com/go-chi/chi/v5"
 
@@ -22,6 +23,8 @@ type Deps struct {
 	Redis  *credis.Client
 	Auth   *auth.Handler
 	Tokens mw.TokenVerifier
+	Access mw.AccessResolver
+	Staff  *staff.Handler
 }
 
 func New(d Deps) *http.Server {
@@ -68,8 +71,21 @@ func Router(d Deps) http.Handler {
 		})
 
 		r.Route("/staff", func(r chi.Router) {
-			r.Use(authn(domain.AudienceStaff))
+			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access))
 			r.Get("/me", d.Auth.Me)
+			r.Put("/{staffID}/global-roles/{role}", d.Staff.GrantGlobalRole)
+			r.Delete("/{staffID}/global-roles/{role}", d.Staff.RevokeGlobalRole)
+			r.Post("/{staffID}/deactivate", d.Staff.Deactivate)
+			r.Post("/{staffID}/sessions/revoke-all", d.Staff.RevokeSessions)
+		})
+
+		r.Route("/outlets/{outletID}/staff", func(r chi.Router) {
+			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access),
+				mw.RequireOutletPermission(domain.PermStaffManage))
+			r.Get("/", d.Staff.List)
+			r.Post("/", d.Staff.Create)
+			r.Put("/{staffID}/roles/{role}", d.Staff.GrantRole)
+			r.Delete("/{staffID}/roles/{role}", d.Staff.RevokeRole)
 		})
 	})
 

@@ -59,6 +59,9 @@ type Auth struct {
 	// old token and receive the same successor, instead of tripping reuse
 	// detection.
 	RefreshGrace time.Duration
+	// AuthzCacheTTL bounds how long cached staff permissions live. Changes
+	// invalidate the cache explicitly; the TTL is a backstop.
+	AuthzCacheTTL time.Duration
 }
 
 type OTP struct {
@@ -121,6 +124,7 @@ func Load() (*Config, error) {
 			StaffRefreshTTL:         durDef("STAFF_REFRESH_TTL", 12*time.Hour),
 			DeviceRefreshTTL:        durDef("DEVICE_REFRESH_TTL", 90*24*time.Hour),
 			RefreshGrace:            durDef("REFRESH_GRACE", 30*time.Second),
+			AuthzCacheTTL:           durDef("AUTHZ_CACHE_TTL", 10*time.Minute),
 		},
 		OTP: OTP{
 			Pepper:              req("OTP_PEPPER"),
