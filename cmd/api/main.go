@@ -14,6 +14,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/authz"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
+	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/server"
 	"github.com/duniandewon/madkunyah-be-service/internal/staff"
 	"github.com/duniandewon/madkunyah-be-service/migrations"
@@ -78,23 +79,31 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	authSvc, dispatcher, err := newAuthService(cfg, db, rdb, signer)
+	access := authz.NewResolver(db, rdb, cfg.Auth.AuthzCacheTTL)
+	authRepo := auth.NewRepository(db)
+	authSvc, dispatcher, err := newAuthService(cfg, authRepo, rdb, signer, access)
 	if err != nil {
 		return err
 	}
 	defer dispatcher.Wait()
 
-	access := authz.NewResolver(db, rdb, cfg.Auth.AuthzCacheTTL)
-	staffSvc := staff.NewService(staff.NewRepository(db), access, rdb)
+	staffSvc := staff.NewService(staff.NewRepository(db), access, rdb, staff.PINConfig{
+		Denylist:  cfg.PIN.Denylist,
+		MemoryKiB: cfg.PIN.Argon2MemoryKiB,
+		Time:      cfg.PIN.Argon2Time,
+		Threads:   cfg.PIN.Argon2Threads,
+	})
 
 	srv := server.New(server.Deps{
-		Config: cfg,
-		DB:     db,
-		Redis:  rdb,
-		Auth:   auth.NewHandler(authSvc, signer),
-		Tokens: signer,
-		Access: access,
-		Staff:  staff.NewHandler(staffSvc),
+		Config:  cfg,
+		DB:      db,
+		Redis:   rdb,
+		Auth:    auth.NewHandler(authSvc, signer),
+		Tokens:  signer,
+		Access:  access,
+		Devices: authRepo,
+		Staff:   staff.NewHandler(staffSvc),
+		POS:     pos.NewHandler(pos.NewService(pos.NewRepository(db))),
 	})
 
 	errCh := make(chan error, 1)
@@ -124,7 +133,8 @@ func run() error {
 	return nil
 }
 
-func newAuthService(cfg *config.Config, db *postgres.DB, rdb *credis.Client, signer *auth.Signer) (*auth.Service, *auth.Dispatcher, error) {
+func newAuthService(cfg *config.Config, repo *auth.Repository, rdb *credis.Client, signer *auth.Signer,
+	access *authz.Resolver) (*auth.Service, *auth.Dispatcher, error) {
 	loc, err := time.LoadLocation(cfg.OTP.QuotaTimezone)
 	if err != nil {
 		return nil, nil, err
@@ -132,7 +142,6 @@ func newAuthService(cfg *config.Config, db *postgres.DB, rdb *credis.Client, sig
 	// The log notifier stands in until WhatsApp/SMTP are integrated. Codes are
 	// printed only in local development.
 	dispatcher := auth.NewDispatcher(notifier.NewLog(cfg.Env == "development"), rdb, cfg.OTP.DispatchRetryWindow)
-	repo := auth.NewRepository(db)
 
 	svc := auth.NewService(auth.Config{
 		Pepper:              []byte(cfg.OTP.Pepper),
@@ -150,6 +159,7 @@ func newAuthService(cfg *config.Config, db *postgres.DB, rdb *credis.Client, sig
 			domain.AudiencePOS:      cfg.Auth.DeviceRefreshTTL,
 		},
 		RefreshGrace: cfg.Auth.RefreshGrace,
+		DeviceLimit:  cfg.Auth.DeviceLimit,
 	}, auth.Deps{
 		OTPs:       rdb,
 		Limiter:    rdb,
@@ -160,6 +170,9 @@ func newAuthService(cfg *config.Config, db *postgres.DB, rdb *credis.Client, sig
 		Events:     repo,
 		Dispatcher: dispatcher,
 		Signer:     signer,
+		Access:     access,
+		Devices:    repo,
+		Tracker:    repo,
 	})
 	return svc, dispatcher, nil
 }

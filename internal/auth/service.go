@@ -18,14 +18,23 @@ type Purpose string
 const (
 	PurposeCustomerLogin Purpose = "customer_login"
 	PurposeStaffLogin    Purpose = "staff_login"
+	// PurposeDeviceEnroll codes are redeemed by device enrollment, never by
+	// /otp/verify, and so never open a staff session (FR-VER-9).
+	PurposeDeviceEnroll Purpose = "device_enroll"
 )
 
+// audience is who the code is for: the subject type of its auth events and,
+// for login purposes, the session it opens.
 func (p Purpose) audience() domain.Audience {
-	if p == PurposeStaffLogin {
+	if p == PurposeStaffLogin || p == PurposeDeviceEnroll {
 		return domain.AudienceStaff
 	}
 	return domain.AudienceCustomer
 }
+
+// isStaff reports whether the purpose is restricted to existing staff, with
+// a decoy record stored for anyone else (FR-OTP-8).
+func (p Purpose) isStaff() bool { return p.audience() == domain.AudienceStaff }
 
 var errAuthUnavailable = domain.NewError(domain.CodeAuthUnavailable,
 	"Authentication is temporarily unavailable. Try again shortly.")
@@ -81,12 +90,32 @@ type sessionStore interface {
 	GetSession(ctx context.Context, hash string) (*credis.Session, error)
 	RotateSession(ctx context.Context, oldHash, newHash string, s *credis.Session, ttl, grace time.Duration, successor []byte) (bool, error)
 	GetSuccessor(ctx context.Context, oldHash string) ([]byte, error)
+	IsDeviceRevoked(ctx context.Context, hash string) (bool, error)
 }
 
 type sessionRevoker interface {
 	RevokeFamily(ctx context.Context, familyID string) error
 	RevokeSubject(ctx context.Context, subjectType, subjectID string) error
+	RevokeDevice(ctx context.Context, deviceID string) error
 	DenyToken(ctx context.Context, jti string, ttl time.Duration) error
+}
+
+type accessLoader interface {
+	Load(ctx context.Context, staffID string) (*domain.StaffAccess, error)
+}
+
+// deviceRegistry enrolls and revokes POS devices.
+type deviceRegistry interface {
+	CountOtherActiveDevices(ctx context.Context, outletID, fingerprint string) (int, error)
+	EnrollDevice(ctx context.Context, e *Enrollment) (*EnrollResult, error)
+	RevokeDevice(ctx context.Context, actorID, deviceID string) (string, bool, error)
+}
+
+// deviceTracker backs the per-refresh device checks (FR-DEV-5, FR-DEV-8).
+type deviceTracker interface {
+	DeviceOutlet(ctx context.Context, deviceID string) (string, error)
+	DeviceActive(ctx context.Context, deviceID, outletID string) (bool, error)
+	TouchDevice(ctx context.Context, deviceID string) error
 }
 
 type subjectRepository interface {
@@ -119,6 +148,7 @@ type Config struct {
 	QuotaLocation       *time.Location
 	RefreshTTL          map[domain.Audience]time.Duration
 	RefreshGrace        time.Duration
+	DeviceLimit         int
 }
 
 type Deps struct {
@@ -131,6 +161,9 @@ type Deps struct {
 	Events     eventRecorder
 	Dispatcher otpDispatcher
 	Signer     *Signer
+	Access     accessLoader
+	Devices    deviceRegistry
+	Tracker    deviceTracker
 }
 
 type Service struct {

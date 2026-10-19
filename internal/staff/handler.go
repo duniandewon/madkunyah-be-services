@@ -29,6 +29,36 @@ type createBody struct {
 	Role     string `json:"role" validate:"required,oneof=cashier supervisor manager owner"`
 }
 
+type pinBody struct {
+	PIN string `json:"pin" validate:"required,len=6,numeric"`
+}
+
+func (h *Handler) SetPIN(w http.ResponseWriter, r *http.Request) {
+	var body pinBody
+	if err := httpx.DecodeValid(w, r, &body); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	staffID := middleware.PrincipalFrom(r.Context()).Subject
+	if err := h.svc.SetPIN(r.Context(), staffID, body.PIN, meta(r)); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.NoContent(w)
+}
+
+func (h *Handler) ResetPIN(w http.ResponseWriter, r *http.Request) {
+	staffID, ok := staffIDParam(w, r)
+	if !ok {
+		return
+	}
+	if err := h.svc.ResetPIN(r.Context(), middleware.AccessFrom(r.Context()), staffID, meta(r)); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.NoContent(w)
+}
+
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	members, err := h.svc.List(r.Context(), chi.URLParam(r, "outletID"))
 	if err != nil {
@@ -128,6 +158,10 @@ func staffIDParam(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return id, true
+}
+
+func meta(r *http.Request) RequestMeta {
+	return RequestMeta{IP: httpx.ClientIP(r), UserAgent: r.UserAgent()}
 }
 
 func staffAndRole(w http.ResponseWriter, r *http.Request) (string, string, bool) {

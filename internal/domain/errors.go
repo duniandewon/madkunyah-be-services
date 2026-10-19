@@ -24,6 +24,9 @@ const (
 	CodeTokenExpired      ErrorCode = "token_expired"
 	CodeTokenInvalid      ErrorCode = "token_invalid"
 	CodeSessionRevoked    ErrorCode = "session_revoked"
+	CodeDeviceRevoked     ErrorCode = "device_revoked"
+	CodeDeviceLimit       ErrorCode = "device_limit_reached"
+	CodeWeakPIN           ErrorCode = "weak_pin"
 	CodeAuthUnavailable   ErrorCode = "auth_unavailable"
 	CodeShiftClosed       ErrorCode = "shift_closed"
 	CodeInternal          ErrorCode = "internal_error"
@@ -79,4 +82,7 @@ var (
 	ErrNotFound     = NewError(CodeNotFound, "resource not found")
 	ErrUnauthorized = NewError(CodeUnauthorized, "authentication required")
 	ErrForbidden    = NewError(CodeForbidden, "insufficient permissions")
+	// ErrDeviceRevoked tells the POS to stop selling and wipe its roster
+	// (FR-DEV-6). It is returned by refresh and by every pos route.
+	ErrDeviceRevoked = NewError(CodeDeviceRevoked, "This device has been revoked. Enroll it again.")
 )

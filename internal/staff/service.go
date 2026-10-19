@@ -17,6 +17,8 @@ type repository interface {
 	GrantGlobalRole(ctx context.Context, actorID, staffID, role string) (bool, error)
 	RevokeGlobalRole(ctx context.Context, actorID, staffID, role string) (bool, error)
 	Deactivate(ctx context.Context, actorID, staffID string) (bool, error)
+	SetPIN(ctx context.Context, staffID, hash string, meta RequestMeta) (bool, error)
+	ResetPIN(ctx context.Context, actorID, staffID string, meta RequestMeta) error
 }
 
 type accessStore interface {
@@ -32,10 +34,17 @@ type Service struct {
 	repo     repository
 	access   accessStore
 	sessions sessionRevoker
+	pin      PINConfig
 }
 
-func NewService(repo repository, access accessStore, sessions sessionRevoker) *Service {
-	return &Service{repo: repo, access: access, sessions: sessions}
+func NewService(repo repository, access accessStore, sessions sessionRevoker, pin PINConfig) *Service {
+	return &Service{repo: repo, access: access, sessions: sessions, pin: pin}
+}
+
+// RequestMeta is the caller context recorded on PIN auth events.
+type RequestMeta struct {
+	IP        string
+	UserAgent string
 }
 
 type CreateInput struct {
@@ -131,6 +140,44 @@ func (s *Service) RevokeSessions(ctx context.Context, actor *domain.StaffAccess,
 		return domain.WrapError(domain.CodeAuthUnavailable, errAuthUnavailable, err)
 	}
 	return nil
+}
+
+// SetPIN sets the caller's own POS unlock PIN (FR-PIN-3, FR-PIN-4). The
+// route accepts only staff tokens, so a PIN is always set after an OTP
+// login, never from a PIN-unlocked POS session.
+func (s *Service) SetPIN(ctx context.Context, staffID, pin string, meta RequestMeta) error {
+	if err := checkPIN(pin, s.pin.Denylist); err != nil {
+		return err
+	}
+	hash, err := hashPIN(pin, s.pin)
+	if err != nil {
+		return err
+	}
+	ok, err := s.repo.SetPIN(ctx, staffID, hash, meta)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// ResetPIN clears another staff member's PIN (FR-PIN-5). They then set a
+// new one after an OTP login. Devices drop the old PIN on their next roster
+// fetch.
+func (s *Service) ResetPIN(ctx context.Context, actor *domain.StaffAccess, staffID string, meta RequestMeta) error {
+	target, err := s.access.Load(ctx, staffID)
+	if err != nil {
+		return err
+	}
+	if target == nil {
+		return domain.ErrNotFound
+	}
+	if err := canResetPIN(actor, target); err != nil {
+		return err
+	}
+	return s.repo.ResetPIN(ctx, actor.StaffID, staffID, meta)
 }
 
 func (s *Service) checkRoleChange(actor *domain.StaffAccess, staffID string, g grant) error {

@@ -90,3 +90,28 @@ func TestCanManage(t *testing.T) {
 		}
 	}
 }
+
+func TestCanResetPIN(t *testing.T) {
+	manager := access("m", nil, map[string][]string{"A": {domain.RoleManager}})
+	supervisor := access("s", nil, map[string][]string{"A": {domain.RoleSupervisor}})
+	globalOwner := access("go", []string{domain.RoleOwner}, nil)
+
+	tests := []struct {
+		name   string
+		actor  *domain.StaffAccess
+		target *domain.StaffAccess
+		want   domain.ErrorCode
+	}{
+		{"manager resets cashier at own outlet", manager, access("c", nil, map[string][]string{"A": {domain.RoleCashier}}), ""},
+		{"manager resets staff also at another outlet", manager, access("c2", nil, map[string][]string{"A": {domain.RoleCashier}, "B": {domain.RoleCashier}}), ""},
+		{"manager resets staff at an unseen outlet", manager, access("c3", nil, map[string][]string{"B": {domain.RoleCashier}}), domain.CodeNotFound},
+		{"supervisor lacks staff.manage", supervisor, access("c4", nil, map[string][]string{"A": {domain.RoleCashier}}), domain.CodeForbidden},
+		{"manager resets global-only staff", manager, access("o", []string{domain.RoleOwner}, nil), domain.CodeNotFound},
+		{"global owner resets global-only staff", globalOwner, access("o2", []string{domain.RoleOwner}, nil), ""},
+	}
+	for _, tt := range tests {
+		if got := code(canResetPIN(tt.actor, tt.target)); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}

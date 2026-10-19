@@ -182,3 +182,48 @@ func (c *Client) IsTokenDenied(ctx context.Context, jti string) (bool, error) {
 	}
 	return n == 1, nil
 }
+
+func deviceRevokedKey(hash string) string { return "refresh:device_revoked:" + hash }
+
+// revokeDeviceFamilyScript deletes a family like revokeFamilyScript, but
+// first leaves a marker for each token, kept as long as the token would have
+// lived, so the device's next refresh can be told device_revoked rather than
+// a generic session_revoked.
+var revokeDeviceFamilyScript = goredis.NewScript(`
+for _, h in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  local ttl = redis.call('PTTL', 'refresh:' .. h)
+  if ttl > 0 then
+    redis.call('SET', 'refresh:device_revoked:' .. h, 1, 'PX', ttl)
+  end
+  redis.call('DEL', 'refresh:' .. h, 'refresh:successor:' .. h)
+end
+redis.call('DEL', KEYS[1])
+return 1
+`)
+
+// RevokeDevice revokes every refresh family bound to a POS device.
+func (c *Client) RevokeDevice(ctx context.Context, deviceID string) error {
+	key := subjectKey("pos", deviceID)
+	families, err := c.rdb.SMembers(ctx, key).Result()
+	if err != nil {
+		return fmt.Errorf("list device families: %w", err)
+	}
+	for _, fam := range families {
+		if err := revokeDeviceFamilyScript.Run(ctx, c.rdb, []string{familyKey(fam)}).Err(); err != nil {
+			return fmt.Errorf("revoke device family: %w", err)
+		}
+	}
+	if err := c.rdb.Del(ctx, key).Err(); err != nil {
+		return fmt.Errorf("delete device index: %w", err)
+	}
+	return nil
+}
+
+// IsDeviceRevoked reports whether a refresh token was ended by RevokeDevice.
+func (c *Client) IsDeviceRevoked(ctx context.Context, hash string) (bool, error) {
+	n, err := c.rdb.Exists(ctx, deviceRevokedKey(hash)).Result()
+	if err != nil {
+		return false, fmt.Errorf("check device revocation: %w", err)
+	}
+	return n == 1, nil
+}

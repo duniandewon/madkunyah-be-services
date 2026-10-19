@@ -9,6 +9,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
+	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/staff"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
 	"github.com/go-chi/chi/v5"
@@ -18,13 +19,15 @@ import (
 )
 
 type Deps struct {
-	Config *config.Config
-	DB     *postgres.DB
-	Redis  *credis.Client
-	Auth   *auth.Handler
-	Tokens mw.TokenVerifier
-	Access mw.AccessResolver
-	Staff  *staff.Handler
+	Config  *config.Config
+	DB      *postgres.DB
+	Redis   *credis.Client
+	Auth    *auth.Handler
+	Tokens  mw.TokenVerifier
+	Access  mw.AccessResolver
+	Devices mw.DeviceChecker
+	Staff   *staff.Handler
+	POS     *pos.Handler
 }
 
 func New(d Deps) *http.Server {
@@ -63,6 +66,11 @@ func Router(d Deps) http.Handler {
 			// the one route shared by both browser audiences.
 			r.With(authn(domain.AudienceCustomer, domain.AudienceStaff)).
 				Post("/sessions/revoke-all", d.Auth.RevokeAll)
+			// Unauthenticated: the device_enroll code in the body is the
+			// credential.
+			r.Post("/devices/enroll", d.Auth.EnrollDevice)
+			r.With(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access)).
+				Post("/devices/{deviceID}/revoke", d.Auth.RevokeDevice)
 		})
 
 		r.Group(func(r chi.Router) {
@@ -73,6 +81,8 @@ func Router(d Deps) http.Handler {
 		r.Route("/staff", func(r chi.Router) {
 			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access))
 			r.Get("/me", d.Auth.Me)
+			r.Post("/me/pin", d.Staff.SetPIN)
+			r.Delete("/{staffID}/pin", d.Staff.ResetPIN)
 			r.Put("/{staffID}/global-roles/{role}", d.Staff.GrantGlobalRole)
 			r.Delete("/{staffID}/global-roles/{role}", d.Staff.RevokeGlobalRole)
 			r.Post("/{staffID}/deactivate", d.Staff.Deactivate)
@@ -86,6 +96,12 @@ func Router(d Deps) http.Handler {
 			r.Post("/", d.Staff.Create)
 			r.Put("/{staffID}/roles/{role}", d.Staff.GrantRole)
 			r.Delete("/{staffID}/roles/{role}", d.Staff.RevokeRole)
+		})
+
+		r.Route("/pos", func(r chi.Router) {
+			r.Use(authn(domain.AudiencePOS), mw.RequireActiveDevice(d.Devices))
+			r.Get("/roster", d.POS.Roster)
+			r.Post("/pin-failures", d.POS.PINFailures)
 		})
 	})
 

@@ -38,16 +38,16 @@ func NoContent(w http.ResponseWriter) { w.WriteHeader(http.StatusNoContent) }
 // errors and never choose a status themselves.
 func statusFor(code domain.ErrorCode) int {
 	switch code {
-	case domain.CodeInvalidInput, domain.CodeInvalidIdentifier:
+	case domain.CodeInvalidInput, domain.CodeInvalidIdentifier, domain.CodeWeakPIN:
 		return http.StatusBadRequest
 	case domain.CodeUnauthorized, domain.CodeOTPInvalid, domain.CodeTokenExpired,
-		domain.CodeTokenInvalid, domain.CodeSessionRevoked:
+		domain.CodeTokenInvalid, domain.CodeSessionRevoked, domain.CodeDeviceRevoked:
 		return http.StatusUnauthorized
 	case domain.CodeForbidden:
 		return http.StatusForbidden
 	case domain.CodeNotFound:
 		return http.StatusNotFound
-	case domain.CodeConflict, domain.CodeShiftClosed:
+	case domain.CodeConflict, domain.CodeShiftClosed, domain.CodeDeviceLimit:
 		return http.StatusConflict
 	case domain.CodeRateLimited, domain.CodeOTPCooldown, domain.CodeOTPQuotaExceeded:
 		return http.StatusTooManyRequests

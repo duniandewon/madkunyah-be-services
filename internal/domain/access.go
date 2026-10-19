@@ -11,7 +11,11 @@ const (
 	RoleOwner      = "owner"
 )
 
-const PermStaffManage = "staff.manage"
+const (
+	PermStaffManage  = "staff.manage"
+	PermDeviceEnroll = "device.enroll"
+	PermDeviceRevoke = "device.revoke"
+)
 
 // AccessScope is the set of roles, and the permissions they carry, that a
 // staff member holds in one scope: one outlet, or globally.

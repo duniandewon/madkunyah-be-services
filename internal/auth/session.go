@@ -103,13 +103,16 @@ func (s *Service) Refresh(ctx context.Context, raw string, expected domain.Audie
 	for range 2 {
 		sess, err := s.deps.Sessions.GetSession(ctx, hash)
 		if errors.Is(err, credis.ErrNotFound) {
-			return nil, errSessionRevoked
+			return nil, s.missingSession(ctx, hash)
 		}
 		if err != nil {
 			return nil, unavailable(err)
 		}
 		if expected != "" && sess.SubjectType != string(expected) {
 			return nil, errSessionRevoked
+		}
+		if err := s.checkDevice(ctx, sess); err != nil {
+			return nil, err
 		}
 		if sess.Rotated {
 			return s.handleRotated(ctx, hash, sess, meta)
@@ -145,8 +148,53 @@ func (s *Service) rotate(ctx context.Context, hash string, sess *credis.Session,
 	}
 	if rotated {
 		s.record(ctx, sessionEvent(sess, "token.refreshed", meta))
+		s.touchDevice(ctx, sess)
 	}
 	return pair, rotated, nil
+}
+
+// missingSession explains an unknown refresh token: device_revoked when its
+// device was revoked (FR-DEV-5), session_revoked otherwise.
+func (s *Service) missingSession(ctx context.Context, hash string) error {
+	revoked, err := s.deps.Sessions.IsDeviceRevoked(ctx, hash)
+	if err != nil {
+		return unavailable(err)
+	}
+	if revoked {
+		return domain.ErrDeviceRevoked
+	}
+	return errSessionRevoked
+}
+
+// checkDevice refuses a POS session whose device is no longer active at its
+// outlet. Postgres is the source of truth, so a revocation whose Redis step
+// failed still takes effect here, and the leftover sessions are cleared.
+func (s *Service) checkDevice(ctx context.Context, sess *credis.Session) error {
+	if sess.SubjectType != string(domain.AudiencePOS) {
+		return nil
+	}
+	active, err := s.deps.Tracker.DeviceActive(ctx, sess.DeviceID, sess.OutletID)
+	if err != nil {
+		return err
+	}
+	if active {
+		return nil
+	}
+	if err := s.deps.Revoker.RevokeDevice(ctx, sess.DeviceID); err != nil {
+		slog.ErrorContext(ctx, "revoke sessions of inactive device", "device_id", sess.DeviceID, "error", err)
+	}
+	return domain.ErrDeviceRevoked
+}
+
+// touchDevice records a successful POS refresh (FR-DEV-8). A failure is
+// logged: last_seen_at is informational and must not block the POS.
+func (s *Service) touchDevice(ctx context.Context, sess *credis.Session) {
+	if sess.SubjectType != string(domain.AudiencePOS) {
+		return
+	}
+	if err := s.deps.Tracker.TouchDevice(ctx, sess.DeviceID); err != nil {
+		slog.ErrorContext(ctx, "update device last_seen_at", "device_id", sess.DeviceID, "error", err)
+	}
 }
 
 func (s *Service) handleRotated(ctx context.Context, hash string, sess *credis.Session, meta RequestMeta) (*TokenPair, error) {
@@ -240,8 +288,17 @@ func (s *Service) denyAccessToken(ctx context.Context, p *domain.Principal) erro
 }
 
 func sessionEvent(sess *credis.Session, name string, meta RequestMeta) *Event {
-	return &Event{SubjectType: sess.SubjectType, SubjectID: sess.SubjectID,
+	return &Event{SubjectType: eventSubjectType(sess.SubjectType), SubjectID: sess.SubjectID,
 		Identifier: sess.Identifier, Name: name, DeviceID: sess.DeviceID, Meta: meta}
+}
+
+// eventSubjectType maps a session audience to an auth_events subject type:
+// a POS session's subject is its device.
+func eventSubjectType(audience string) string {
+	if audience == string(domain.AudiencePOS) {
+		return subjectDevice
+	}
+	return audience
 }
 
 // fingerprint identifies the client for the grace window: the device for a

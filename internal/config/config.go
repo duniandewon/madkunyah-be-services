@@ -17,6 +17,7 @@ type Config struct {
 	Redis Redis
 	Auth  Auth
 	OTP   OTP
+	PIN   PIN
 }
 
 type HTTP struct {
@@ -62,6 +63,8 @@ type Auth struct {
 	// AuthzCacheTTL bounds how long cached staff permissions live. Changes
 	// invalidate the cache explicitly; the TTL is a backstop.
 	AuthzCacheTTL time.Duration
+	// DeviceLimit is the number of active POS devices allowed per outlet.
+	DeviceLimit int
 }
 
 type OTP struct {
@@ -81,6 +84,17 @@ type OTP struct {
 	// DispatchRetryWindow bounds notifier retries; it must stay well inside
 	// TTL so a late delivery is still usable.
 	DispatchRetryWindow time.Duration
+}
+
+// PIN configures the local POS unlock PIN. The hash is verified on the POS
+// itself, so the argon2id cost must stay under 500 ms on POS hardware
+// (NFR-PERF-4).
+type PIN struct {
+	// Denylist holds common PINs rejected on top of repeated digits and runs.
+	Denylist        []string
+	Argon2MemoryKiB uint32
+	Argon2Time      uint32
+	Argon2Threads   uint8
 }
 
 func Load() (*Config, error) {
@@ -125,6 +139,7 @@ func Load() (*Config, error) {
 			DeviceRefreshTTL:        durDef("DEVICE_REFRESH_TTL", 90*24*time.Hour),
 			RefreshGrace:            durDef("REFRESH_GRACE", 30*time.Second),
 			AuthzCacheTTL:           durDef("AUTHZ_CACHE_TTL", 10*time.Minute),
+			DeviceLimit:             intDef("DEVICE_LIMIT_PER_OUTLET", 1),
 		},
 		OTP: OTP{
 			Pepper:              req("OTP_PEPPER"),
@@ -137,6 +152,14 @@ func Load() (*Config, error) {
 			VerifyIPHourlyQuota: intDef("OTP_VERIFY_IP_HOURLY_QUOTA", 30),
 			QuotaTimezone:       def("OTP_QUOTA_TIMEZONE", "Asia/Jakarta"),
 			DispatchRetryWindow: durDef("OTP_DISPATCH_RETRY_WINDOW", 2*time.Minute),
+		},
+		PIN: PIN{
+			Denylist: splitList(def("PIN_DENYLIST",
+				"121212,112233,123123,111222,123321,101010,696969,000123")),
+			// OWASP's minimum argon2id profile (19 MiB, 2 passes).
+			Argon2MemoryKiB: uint32(intDef("PIN_ARGON2_MEMORY_KIB", 19456)),
+			Argon2Time:      uint32(intDef("PIN_ARGON2_TIME", 2)),
+			Argon2Threads:   uint8(intDef("PIN_ARGON2_THREADS", 1)),
 		},
 	}
 

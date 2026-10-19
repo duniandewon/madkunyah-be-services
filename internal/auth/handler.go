@@ -8,6 +8,8 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
 	"github.com/duniandewon/madkunyah-be-service/internal/middleware"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // Browser clients (shop, dashboard) get the refresh token in an HttpOnly
@@ -31,7 +33,8 @@ func NewHandler(svc *Service, signer *Signer) *Handler {
 
 type otpRequestBody struct {
 	Identifier string `json:"identifier" validate:"required"`
-	Purpose    string `json:"purpose" validate:"required,oneof=customer_login staff_login"`
+	Purpose    string `json:"purpose" validate:"required,oneof=customer_login staff_login device_enroll"`
+	OutletID   string `json:"outlet_id" validate:"required_if=Purpose device_enroll,omitempty,uuid"`
 }
 
 type otpVerifyBody struct {
@@ -45,6 +48,23 @@ type otpVerifyBody struct {
 type refreshBody struct {
 	RefreshToken string `json:"refresh_token"`
 	Audience     string `json:"audience" validate:"omitempty,oneof=customer staff pos"`
+}
+
+// enrollBody redeems a device_enroll code. The device submits it itself, so
+// the refresh token is bound to the device that will hold it.
+type enrollBody struct {
+	Identifier        string `json:"identifier" validate:"required"`
+	Code              string `json:"code" validate:"required,numeric,max=10"`
+	OutletID          string `json:"outlet_id" validate:"required,uuid"`
+	Name              string `json:"name" validate:"required,max=100"`
+	DeviceFingerprint string `json:"device_fingerprint" validate:"required,max=255"`
+	Replace           bool   `json:"replace"`
+}
+
+type enrollResponse struct {
+	tokenResponse
+	DeviceID string `json:"device_id"`
+	OutletID string `json:"outlet_id"`
 }
 
 type tokenResponse struct {
@@ -68,7 +88,7 @@ func (h *Handler) RequestOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	in := OTPRequest{Identifier: body.Identifier, Purpose: Purpose(body.Purpose)}
+	in := OTPRequest{Identifier: body.Identifier, Purpose: Purpose(body.Purpose), OutletID: body.OutletID}
 	if err := h.svc.RequestOTP(r.Context(), in, meta(r)); err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -136,6 +156,38 @@ func (h *Handler) RevokeAll(w http.ResponseWriter, r *http.Request) {
 	httpx.NoContent(w)
 }
 
+func (h *Handler) EnrollDevice(w http.ResponseWriter, r *http.Request) {
+	var body enrollBody
+	if err := httpx.DecodeValid(w, r, &body); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	dev, err := h.svc.EnrollDevice(r.Context(), EnrollInput{
+		Identifier: body.Identifier, Code: body.Code, OutletID: body.OutletID,
+		Name: body.Name, Fingerprint: body.DeviceFingerprint, Replace: body.Replace,
+	}, meta(r))
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	resp := enrollResponse{tokenResponse: h.tokenBody(w, dev.Tokens), DeviceID: dev.DeviceID, OutletID: dev.OutletID}
+	httpx.JSON(w, http.StatusCreated, resp)
+}
+
+// RevokeDevice treats a malformed device ID as not_found, like an unknown one.
+func (h *Handler) RevokeDevice(w http.ResponseWriter, r *http.Request) {
+	deviceID := chi.URLParam(r, "deviceID")
+	if _, err := uuid.Parse(deviceID); err != nil {
+		httpx.Error(w, r, domain.ErrNotFound)
+		return
+	}
+	if err := h.svc.RevokeDevice(r.Context(), middleware.AccessFrom(r.Context()), deviceID, meta(r)); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.NoContent(w)
+}
+
 func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	prof, err := h.svc.Profile(r.Context(), middleware.PrincipalFrom(r.Context()))
 	if err != nil {
@@ -154,6 +206,12 @@ func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
 // refresh token as a cookie only; the POS (keystore storage) gets it in the
 // body.
 func (h *Handler) writeTokens(w http.ResponseWriter, pair *TokenPair) {
+	httpx.JSON(w, http.StatusOK, h.tokenBody(w, pair))
+}
+
+// tokenBody sets the refresh cookie and no-store header for pair and
+// returns the response body.
+func (h *Handler) tokenBody(w http.ResponseWriter, pair *TokenPair) tokenResponse {
 	resp := tokenResponse{
 		AccessToken: pair.AccessToken,
 		TokenType:   "Bearer",
@@ -174,7 +232,7 @@ func (h *Handler) writeTokens(w http.ResponseWriter, pair *TokenPair) {
 		resp.RefreshToken = pair.RefreshToken
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	httpx.JSON(w, http.StatusOK, resp)
+	return resp
 }
 
 func refreshTokenFrom(r *http.Request, body *refreshBody) string {

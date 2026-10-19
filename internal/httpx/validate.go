@@ -46,7 +46,7 @@ func Validate(dst interface{}) error {
 
 func describe(fe validator.FieldError) string {
 	switch fe.Tag() {
-	case "required":
+	case "required", "required_if":
 		return "is required"
 	case "oneof":
 		return "must be one of: " + fe.Param()

@@ -22,6 +22,8 @@ var errOTPInvalid = domain.NewError(domain.CodeOTPInvalid,
 type OTPRequest struct {
 	Identifier string
 	Purpose    Purpose
+	// OutletID is the outlet a device_enroll code is requested for.
+	OutletID string
 }
 
 type OTPVerify struct {
@@ -47,7 +49,7 @@ func (s *Service) RequestOTP(ctx context.Context, in OTPRequest, meta RequestMet
 		return err
 	}
 
-	subject, err := s.lookupSubject(ctx, in.Purpose, id)
+	subject, err := s.lookupSubject(ctx, in.Purpose, id, in.OutletID)
 	if err != nil {
 		return err
 	}
@@ -56,7 +58,7 @@ func (s *Service) RequestOTP(ctx context.Context, in OTPRequest, meta RequestMet
 		return err
 	}
 	mac := s.codeMAC(in.Purpose, id, code)
-	decoy := in.Purpose == PurposeStaffLogin && subject == nil
+	decoy := in.Purpose.isStaff() && subject == nil
 	if decoy {
 		// A decoy record counts attempts and expires like a real one but can
 		// never verify, so verify reveals nothing either.
@@ -100,28 +102,47 @@ func (s *Service) checkRequestLimits(ctx context.Context, id domain.Identifier, 
 }
 
 // lookupSubject returns nil (no error) when the identifier is unknown or, for
-// staff, inactive or without any role.
-func (s *Service) lookupSubject(ctx context.Context, purpose Purpose, id domain.Identifier) (*Subject, error) {
-	if purpose == PurposeStaffLogin {
+// staff, inactive or without any role. For device_enroll the staff member
+// must also hold device.enroll at outletID.
+func (s *Service) lookupSubject(ctx context.Context, purpose Purpose, id domain.Identifier, outletID string) (*Subject, error) {
+	switch purpose {
+	case PurposeStaffLogin:
 		return s.deps.Subjects.FindEligibleStaff(ctx, id)
+	case PurposeDeviceEnroll:
+		return s.findEnroller(ctx, id, outletID)
 	}
 	return s.deps.Subjects.FindCustomer(ctx, id)
+}
+
+// findEnroller reads permissions straight from Postgres, not the authz
+// cache: enrollment hands out a 90-day credential.
+func (s *Service) findEnroller(ctx context.Context, id domain.Identifier, outletID string) (*Subject, error) {
+	staff, err := s.deps.Subjects.FindEligibleStaff(ctx, id)
+	if err != nil || staff == nil {
+		return nil, err
+	}
+	access, err := s.deps.Access.Load(ctx, staff.ID)
+	if err != nil {
+		return nil, err
+	}
+	if access == nil || !access.Can(outletID, domain.PermDeviceEnroll) {
+		return nil, nil
+	}
+	return staff, nil
 }
 
 // VerifyOTP checks a code and, on success, starts a session. Every failure
 // cause returns the same otp_invalid error.
 func (s *Service) VerifyOTP(ctx context.Context, in OTPVerify, meta RequestMeta) (*TokenPair, error) {
+	if in.Purpose == PurposeDeviceEnroll {
+		return nil, errOTPInvalid
+	}
 	id, err := domain.ParseIdentifier(in.Identifier)
 	if err != nil {
 		return nil, err
 	}
-	wait, err := s.deps.Limiter.AllowOTPVerify(ctx, meta.IP, s.cfg.VerifyIPHourlyQuota, time.Hour)
-	if err != nil {
-		return nil, unavailable(err)
-	}
-	if wait > 0 {
-		return nil, domain.RateLimitError(domain.CodeRateLimited,
-			"Too many verification attempts. Try again later.", wait)
+	if err := s.allowVerify(ctx, meta.IP); err != nil {
+		return nil, err
 	}
 
 	ok, err := s.checkCode(ctx, in.Purpose, id, in.Code)
@@ -139,7 +160,7 @@ func (s *Service) VerifyOTP(ctx context.Context, in OTPVerify, meta RequestMeta)
 	ev := &Event{SubjectType: string(in.Purpose.audience()), SubjectID: verifiedID, Identifier: id.Value, Meta: meta}
 	if verifiedID == "" {
 		ev.Name = "otp.failed"
-		if subject, err := s.lookupSubject(ctx, in.Purpose, id); err == nil {
+		if subject, err := s.lookupSubject(ctx, in.Purpose, id, ""); err == nil {
 			ev.SubjectID = subjectID(subject)
 		}
 		s.record(ctx, ev)
@@ -149,6 +170,19 @@ func (s *Service) VerifyOTP(ctx context.Context, in OTPVerify, meta RequestMeta)
 	s.record(ctx, ev)
 	return s.startSession(ctx, &newSession{Audience: in.Purpose.audience(), SubjectID: verifiedID,
 		Identifier: id.Value, Meta: meta})
+}
+
+// allowVerify applies the per-IP limit on code submissions (FR-VER-5).
+func (s *Service) allowVerify(ctx context.Context, ip string) error {
+	wait, err := s.deps.Limiter.AllowOTPVerify(ctx, ip, s.cfg.VerifyIPHourlyQuota, time.Hour)
+	if err != nil {
+		return unavailable(err)
+	}
+	if wait > 0 {
+		return domain.RateLimitError(domain.CodeRateLimited,
+			"Too many verification attempts. Try again later.", wait)
+	}
+	return nil
 }
 
 // resolveVerifiedSubject returns the subject to open a session for, or "" if
@@ -166,27 +200,39 @@ func (s *Service) resolveVerifiedSubject(ctx context.Context, purpose Purpose, i
 }
 
 // checkCode counts the attempt, compares in constant time, and consumes the
-// record on success. Of concurrent correct submissions exactly one wins,
-// because only one caller's conditional delete removes the record.
+// record on success.
 func (s *Service) checkCode(ctx context.Context, purpose Purpose, id domain.Identifier, code string) (bool, error) {
-	stored, attempts, err := s.deps.OTPs.AttemptOTP(ctx, string(purpose), id.Value)
-	if errors.Is(err, credis.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
+	stored, match, err := s.matchCode(ctx, purpose, id, code)
+	if err != nil || !match {
 		return false, err
 	}
+	return s.consumeCode(ctx, purpose, id, stored)
+}
 
+// matchCode counts the attempt and compares in constant time, deleting the
+// record once attempts are exhausted. A match is not consumed: the caller
+// must call consumeCode before acting on it.
+func (s *Service) matchCode(ctx context.Context, purpose Purpose, id domain.Identifier, code string) (string, bool, error) {
+	stored, attempts, err := s.deps.OTPs.AttemptOTP(ctx, string(purpose), id.Value)
+	if errors.Is(err, credis.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
 	match := attempts <= s.cfg.MaxAttempts &&
 		hmac.Equal([]byte(stored), []byte(s.codeMAC(purpose, id, code)))
-	if match || attempts >= s.cfg.MaxAttempts {
-		deleted, err := s.deps.OTPs.DeleteOTP(ctx, string(purpose), id.Value, stored)
-		if err != nil {
-			return false, err
-		}
-		return match && deleted, nil
+	if !match && attempts >= s.cfg.MaxAttempts {
+		_, err := s.deps.OTPs.DeleteOTP(ctx, string(purpose), id.Value, stored)
+		return "", false, err
 	}
-	return false, nil
+	return stored, match, nil
+}
+
+// consumeCode deletes a matched record. Of concurrent correct submissions
+// exactly one wins, because only one caller's conditional delete removes it.
+func (s *Service) consumeCode(ctx context.Context, purpose Purpose, id domain.Identifier, stored string) (bool, error) {
+	return s.deps.OTPs.DeleteOTP(ctx, string(purpose), id.Value, stored)
 }
 
 // codeMAC binds the code to its purpose and identifier, so a code issued for

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
@@ -52,6 +53,17 @@ const (
 	deactivateStaff = `
 		UPDATE staff SET is_active = FALSE, deactivated_at = now(), updated_at = now()
 		WHERE id = $1 AND is_active`
+
+	setPIN = `
+		UPDATE staff SET pin_hash = $2, updated_at = now()
+		WHERE id = $1 AND is_active`
+
+	clearPIN = `UPDATE staff SET pin_hash = NULL, updated_at = now() WHERE id = $1`
+
+	insertPINEvent = `
+		INSERT INTO auth_events (id, subject_type, subject_id, identifier, event, ip_address, user_agent)
+		SELECT $1, 'staff', s.id, COALESCE(s.phone, s.email), $3, NULLIF($4, '')::inet, NULLIF($5, '')
+		FROM staff s WHERE s.id = $2`
 
 	insertAuditLog = `
 		INSERT INTO audit_logs (id, outlet_id, actor_id, actor_type, action, entity_type, entity_id, before, after)
@@ -162,6 +174,55 @@ func (r *Repository) Deactivate(ctx context.Context, actorID, staffID string) (b
 	return r.change(ctx, deactivateStaff, []any{staffID},
 		actorID, "", "staff.deactivated", staffID,
 		map[string]bool{"is_active": true}, map[string]bool{"is_active": false})
+}
+
+// SetPIN stores a PIN hash and records pin.set. It reports false when the
+// staff member is missing or inactive.
+func (r *Repository) SetPIN(ctx context.Context, staffID, hash string, meta RequestMeta) (bool, error) {
+	changed := false
+	err := r.db.InTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, setPIN, staffID, hash)
+		if err != nil {
+			return fmt.Errorf("set pin: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		changed = true
+		return pinEvent(ctx, tx, staffID, "pin.set", meta)
+	})
+	return changed, err
+}
+
+// ResetPIN clears a PIN, recording pin.reset in auth_events and, since
+// auth_events has no actor, who did it in audit_logs. Resetting a PIN that
+// was never set succeeds.
+func (r *Repository) ResetPIN(ctx context.Context, actorID, staffID string, meta RequestMeta) error {
+	return r.db.InTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, clearPIN, staffID)
+		if err != nil {
+			return fmt.Errorf("clear pin: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrNotFound
+		}
+		if err := pinEvent(ctx, tx, staffID, "pin.reset", meta); err != nil {
+			return err
+		}
+		return audit(ctx, tx, actorID, "", "pin.reset", staffID, nil, nil)
+	})
+}
+
+func pinEvent(ctx context.Context, tx pgx.Tx, staffID, event string, meta RequestMeta) error {
+	// X-Forwarded-For is client-supplied; store only a parseable address.
+	ip := meta.IP
+	if net.ParseIP(ip) == nil {
+		ip = ""
+	}
+	if _, err := tx.Exec(ctx, insertPINEvent, uuid.NewString(), staffID, event, ip, meta.UserAgent); err != nil {
+		return fmt.Errorf("insert %s event: %w", event, err)
+	}
+	return nil
 }
 
 // change runs one statement and, if it affected a row, the matching audit
