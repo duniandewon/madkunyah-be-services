@@ -47,7 +47,8 @@ func statusFor(code domain.ErrorCode) int {
 		return http.StatusForbidden
 	case domain.CodeNotFound:
 		return http.StatusNotFound
-	case domain.CodeConflict, domain.CodeShiftClosed, domain.CodeDeviceLimit:
+	case domain.CodeConflict, domain.CodeShiftClosed, domain.CodeDeviceLimit,
+		domain.CodeIdentifierInUse:
 		return http.StatusConflict
 	case domain.CodeRateLimited, domain.CodeOTPCooldown, domain.CodeOTPQuotaExceeded:
 		return http.StatusTooManyRequests

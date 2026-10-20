@@ -21,6 +21,10 @@ const (
 	// PurposeDeviceEnroll codes are redeemed by device enrollment, never by
 	// /otp/verify, and so never open a staff session (FR-VER-9).
 	PurposeDeviceEnroll Purpose = "device_enroll"
+	// PurposeCustomerIdentifier codes prove a signed-in customer owns a new
+	// phone or email. They are redeemed by POST /v1/me/identifiers, never by
+	// /otp/verify.
+	PurposeCustomerIdentifier Purpose = "customer_identifier"
 )
 
 // audience is who the code is for: the subject type of its auth events and,
@@ -35,6 +39,9 @@ func (p Purpose) audience() domain.Audience {
 // isStaff reports whether the purpose is restricted to existing staff, with
 // a decoy record stored for anyone else (FR-OTP-8).
 func (p Purpose) isStaff() bool { return p.audience() == domain.AudienceStaff }
+
+// opensSession reports whether /otp/verify may redeem the purpose.
+func (p Purpose) opensSession() bool { return p == PurposeCustomerLogin || p == PurposeStaffLogin }
 
 var errAuthUnavailable = domain.NewError(domain.CodeAuthUnavailable,
 	"Authentication is temporarily unavailable. Try again shortly.")
@@ -124,6 +131,11 @@ type subjectRepository interface {
 	UpsertVerifiedCustomer(ctx context.Context, id domain.Identifier) (string, error)
 }
 
+// identifierRepository sets a customer's phone or email (FR-CUS-2, FR-CUS-3).
+type identifierRepository interface {
+	SetCustomerIdentifier(ctx context.Context, customerID string, id domain.Identifier) (*Profile, error)
+}
+
 type profileRepository interface {
 	FindProfile(ctx context.Context, aud domain.Audience, id string) (*Profile, error)
 }
@@ -152,18 +164,19 @@ type Config struct {
 }
 
 type Deps struct {
-	OTPs       otpStore
-	Limiter    otpLimiter
-	Sessions   sessionStore
-	Revoker    sessionRevoker
-	Subjects   subjectRepository
-	Profiles   profileRepository
-	Events     eventRecorder
-	Dispatcher otpDispatcher
-	Signer     *Signer
-	Access     accessLoader
-	Devices    deviceRegistry
-	Tracker    deviceTracker
+	OTPs        otpStore
+	Limiter     otpLimiter
+	Sessions    sessionStore
+	Revoker     sessionRevoker
+	Subjects    subjectRepository
+	Profiles    profileRepository
+	Events      eventRecorder
+	Dispatcher  otpDispatcher
+	Signer      *Signer
+	Access      accessLoader
+	Devices     deviceRegistry
+	Tracker     deviceTracker
+	Identifiers identifierRepository
 }
 
 type Service struct {

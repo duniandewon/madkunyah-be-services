@@ -76,6 +76,8 @@ func Router(d Deps) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(authn(domain.AudienceCustomer))
 			r.Get("/me", d.Auth.Me)
+			r.Post("/me/identifiers/otp", d.Auth.RequestIdentifierOTP)
+			r.Post("/me/identifiers", d.Auth.AddIdentifier)
 		})
 
 		r.Route("/staff", func(r chi.Router) {

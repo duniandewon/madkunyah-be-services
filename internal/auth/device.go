@@ -108,7 +108,7 @@ func (s *Service) EnrollDevice(ctx context.Context, in EnrollInput, meta Request
 // 409 device_limit_reached can be retried with replace using the same code.
 // Every code or permission failure is the same otp_invalid.
 func (s *Service) redeemEnrollCode(ctx context.Context, id domain.Identifier, in *EnrollInput, meta RequestMeta) (string, error) {
-	stored, match, err := s.matchCode(ctx, PurposeDeviceEnroll, id, in.Code)
+	stored, match, err := s.matchCode(ctx, PurposeDeviceEnroll, id, "", in.Code)
 	if err != nil {
 		return "", unavailable(err)
 	}

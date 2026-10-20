@@ -61,6 +61,16 @@ type enrollBody struct {
 	Replace           bool   `json:"replace"`
 }
 
+type identifierOTPBody struct {
+	Identifier string `json:"identifier" validate:"required"`
+}
+
+// identifierBody redeems a customer_identifier code.
+type identifierBody struct {
+	Identifier string `json:"identifier" validate:"required"`
+	Code       string `json:"code" validate:"required,numeric,max=10"`
+}
+
 type enrollResponse struct {
 	tokenResponse
 	DeviceID string `json:"device_id"`
@@ -93,11 +103,7 @@ func (h *Handler) RequestOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	httpx.JSON(w, http.StatusAccepted, otpAcceptedResponse{
-		Status:      "sent_if_eligible",
-		ExpiresIn:   seconds(h.svc.cfg.OTPTTL),
-		ResendAfter: seconds(h.svc.cfg.Cooldown),
-	})
+	h.writeOTPAccepted(w)
 }
 
 func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +194,38 @@ func (h *Handler) RevokeDevice(w http.ResponseWriter, r *http.Request) {
 	httpx.NoContent(w)
 }
 
+// RequestIdentifierOTP sends a code to the phone or email the signed-in
+// customer wants to add.
+func (h *Handler) RequestIdentifierOTP(w http.ResponseWriter, r *http.Request) {
+	var body identifierOTPBody
+	if err := httpx.DecodeValid(w, r, &body); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	p := middleware.PrincipalFrom(r.Context())
+	if err := h.svc.RequestIdentifierOTP(r.Context(), p.Subject, body.Identifier, meta(r)); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	h.writeOTPAccepted(w)
+}
+
+// AddIdentifier redeems the code and returns the updated profile.
+func (h *Handler) AddIdentifier(w http.ResponseWriter, r *http.Request) {
+	var body identifierBody
+	if err := httpx.DecodeValid(w, r, &body); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	p := middleware.PrincipalFrom(r.Context())
+	prof, err := h.svc.AddIdentifier(r.Context(), p.Subject, IdentifierInput(body), meta(r))
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, prof)
+}
+
 func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	prof, err := h.svc.Profile(r.Context(), middleware.PrincipalFrom(r.Context()))
 	if err != nil {
@@ -200,6 +238,16 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	httpx.JSON(w, http.StatusOK, map[string][]JWK{"keys": h.signer.JWKS()})
+}
+
+// writeOTPAccepted writes the one 202 body every code request gets
+// (FR-OTP-12).
+func (h *Handler) writeOTPAccepted(w http.ResponseWriter) {
+	httpx.JSON(w, http.StatusAccepted, otpAcceptedResponse{
+		Status:      "sent_if_eligible",
+		ExpiresIn:   seconds(h.svc.cfg.OTPTTL),
+		ResendAfter: seconds(h.svc.cfg.Cooldown),
+	})
 }
 
 // writeTokens returns the access token in the body. Browser audiences get the

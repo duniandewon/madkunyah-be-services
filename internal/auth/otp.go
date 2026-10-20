@@ -57,7 +57,7 @@ func (s *Service) RequestOTP(ctx context.Context, in OTPRequest, meta RequestMet
 	if err != nil {
 		return err
 	}
-	mac := s.codeMAC(in.Purpose, id, code)
+	mac := s.codeMAC(in.Purpose, id, "", code)
 	decoy := in.Purpose.isStaff() && subject == nil
 	if decoy {
 		// A decoy record counts attempts and expires like a real one but can
@@ -134,7 +134,7 @@ func (s *Service) findEnroller(ctx context.Context, id domain.Identifier, outlet
 // VerifyOTP checks a code and, on success, starts a session. Every failure
 // cause returns the same otp_invalid error.
 func (s *Service) VerifyOTP(ctx context.Context, in OTPVerify, meta RequestMeta) (*TokenPair, error) {
-	if in.Purpose == PurposeDeviceEnroll {
+	if !in.Purpose.opensSession() {
 		return nil, errOTPInvalid
 	}
 	id, err := domain.ParseIdentifier(in.Identifier)
@@ -145,7 +145,7 @@ func (s *Service) VerifyOTP(ctx context.Context, in OTPVerify, meta RequestMeta)
 		return nil, err
 	}
 
-	ok, err := s.checkCode(ctx, in.Purpose, id, in.Code)
+	ok, err := s.checkCode(ctx, in.Purpose, id, "", in.Code)
 	if err != nil {
 		return nil, unavailable(err)
 	}
@@ -201,8 +201,8 @@ func (s *Service) resolveVerifiedSubject(ctx context.Context, purpose Purpose, i
 
 // checkCode counts the attempt, compares in constant time, and consumes the
 // record on success.
-func (s *Service) checkCode(ctx context.Context, purpose Purpose, id domain.Identifier, code string) (bool, error) {
-	stored, match, err := s.matchCode(ctx, purpose, id, code)
+func (s *Service) checkCode(ctx context.Context, purpose Purpose, id domain.Identifier, bind, code string) (bool, error) {
+	stored, match, err := s.matchCode(ctx, purpose, id, bind, code)
 	if err != nil || !match {
 		return false, err
 	}
@@ -212,7 +212,7 @@ func (s *Service) checkCode(ctx context.Context, purpose Purpose, id domain.Iden
 // matchCode counts the attempt and compares in constant time, deleting the
 // record once attempts are exhausted. A match is not consumed: the caller
 // must call consumeCode before acting on it.
-func (s *Service) matchCode(ctx context.Context, purpose Purpose, id domain.Identifier, code string) (string, bool, error) {
+func (s *Service) matchCode(ctx context.Context, purpose Purpose, id domain.Identifier, bind, code string) (string, bool, error) {
 	stored, attempts, err := s.deps.OTPs.AttemptOTP(ctx, string(purpose), id.Value)
 	if errors.Is(err, credis.ErrNotFound) {
 		return "", false, nil
@@ -221,7 +221,7 @@ func (s *Service) matchCode(ctx context.Context, purpose Purpose, id domain.Iden
 		return "", false, err
 	}
 	match := attempts <= s.cfg.MaxAttempts &&
-		hmac.Equal([]byte(stored), []byte(s.codeMAC(purpose, id, code)))
+		hmac.Equal([]byte(stored), []byte(s.codeMAC(purpose, id, bind, code)))
 	if !match && attempts >= s.cfg.MaxAttempts {
 		_, err := s.deps.OTPs.DeleteOTP(ctx, string(purpose), id.Value, stored)
 		return "", false, err
@@ -236,10 +236,15 @@ func (s *Service) consumeCode(ctx context.Context, purpose Purpose, id domain.Id
 }
 
 // codeMAC binds the code to its purpose and identifier, so a code issued for
-// one flow can never be replayed against another.
-func (s *Service) codeMAC(purpose Purpose, id domain.Identifier, code string) string {
+// one flow can never be replayed against another. A non-empty bind also ties
+// it to one subject, so only the requester can redeem it.
+func (s *Service) codeMAC(purpose Purpose, id domain.Identifier, bind, code string) string {
+	msg := string(purpose) + "\x00" + id.Value
+	if bind != "" {
+		msg += "\x00" + bind
+	}
 	m := hmac.New(sha256.New, s.cfg.Pepper)
-	m.Write([]byte(string(purpose) + "\x00" + id.Value + "\x00" + code))
+	m.Write([]byte(msg + "\x00" + code))
 	return hex.EncodeToString(m.Sum(nil))
 }
 

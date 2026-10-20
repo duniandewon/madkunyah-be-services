@@ -26,6 +26,7 @@ const (
 	CodeSessionRevoked    ErrorCode = "session_revoked"
 	CodeDeviceRevoked     ErrorCode = "device_revoked"
 	CodeDeviceLimit       ErrorCode = "device_limit_reached"
+	CodeIdentifierInUse   ErrorCode = "identifier_in_use"
 	CodeWeakPIN           ErrorCode = "weak_pin"
 	CodeAuthUnavailable   ErrorCode = "auth_unavailable"
 	CodeShiftClosed       ErrorCode = "shift_closed"
