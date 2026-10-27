@@ -4,16 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Go backend for MadKunyah, a multi-outlet F&B business: one API serving the online shop, the in-store POS, and the owner dashboard. The full product spec (scope decisions, data model DDL, auth flow, order lifecycle, API surface, roadmap) is in `context/project-overview.md`. Read the relevant section of it before building any feature. Built so far: HTTP skeleton, config, Postgres/Redis connections, embedded migrations (applied at startup from `migrations/`), auth slice 1 (OTP login, JWT + rotating refresh sessions) in `internal/auth`, outlet-scoped authorization (`internal/authz`) with staff management endpoints (`internal/staff`), and auth slice 3: POS device enrollment/revocation (`internal/auth`), staff PIN set/reset (`internal/staff`), the POS roster and PIN-failure endpoints (`internal/pos`), and auth slice 4: customer identifier add/change (`POST /v1/me/identifiers`, `internal/auth`).
+Go backend for MadKunyah, a multi-outlet F&B business: one API serving the online shop, the in-store POS, and the owner dashboard. The full product spec (scope decisions, data model DDL, auth flow, order lifecycle, API surface, roadmap) is in `context/project-overview.md`. Read the relevant section of it before building any feature; the DDL, flow diagrams, API surface and roadmap live in `context/spec/`. Migrations in `migrations/` are embedded and applied at startup. What's built so far is in the History of `context/current-feature.md`.
+
+Never read `context/features/auth-spec.md` whole (~10k tokens). Search it, or read only the line ranges you need.
 
 ## Context files
 
 In order to have the full context of this project, make sure to always reference these files:
 
-- @context/project-overview.md
-- @context/coding-standards.md
-- @context/ai-interaction.md
-- @context/current-feature.md
+- `context/project-overview.md`
+- `context/coding-standards.md`
+- `context/ai-interaction.md`
+- `context/current-feature.md`
 
 ## Commands
 
@@ -27,5 +29,3 @@ go test ./internal/httpx -run TestName   # single test
 ```
 
 Config is loaded from env vars (`.env` is read automatically via godotenv). Required: `DATABASE_URL`, `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY` (PEM-encoded ECDSA P-256), `OTP_PEPPER`. Everything else has defaults in `internal/config/config.go`. Startup fails fast if Postgres or Redis can't be pinged.
-
-Health endpoints: `GET /health` (liveness), `GET /ready` (checks DB + Redis).
