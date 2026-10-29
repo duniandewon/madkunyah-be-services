@@ -54,6 +54,13 @@ func describe(fe validator.FieldError) string {
 		return "must be " + fe.Param() + " characters"
 	case "numeric":
 		return "must contain only digits"
+	case "max":
+		if fe.Kind() == reflect.String {
+			return "must be at most " + fe.Param() + " characters"
+		}
+		return "must have at most " + fe.Param() + " items"
+	case "uuid":
+		return "must be a UUID"
 	default:
 		return "is invalid"
 	}

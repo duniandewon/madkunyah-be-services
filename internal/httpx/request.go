@@ -24,6 +24,7 @@ func Decode(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	if err := dec.Decode(dst); err != nil {
 		var syntaxErr *json.SyntaxError
 		var typeErr *json.UnmarshalTypeError
+		var sizeErr *http.MaxBytesError
 		switch {
 		case errors.As(err, &syntaxErr):
 			return domain.NewError(domain.CodeInvalidInput, "request body is not valid JSON")
@@ -31,6 +32,8 @@ func Decode(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 			return domain.ValidationError(map[string]string{
 				typeErr.Field: "expected " + typeErr.Type.String(),
 			})
+		case errors.As(err, &sizeErr):
+			return domain.NewError(domain.CodeInvalidInput, "request body is too large")
 		case errors.Is(err, io.EOF):
 			return domain.NewError(domain.CodeInvalidInput, "request body is empty")
 		case strings.Contains(err.Error(), "unknown field"):

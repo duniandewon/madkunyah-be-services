@@ -11,13 +11,19 @@ import (
 )
 
 type Config struct {
-	Env   string
-	HTTP  HTTP
-	DB    DB
-	Redis Redis
-	Auth  Auth
-	OTP   OTP
-	PIN   PIN
+	Env     string
+	HTTP    HTTP
+	DB      DB
+	Redis   Redis
+	Auth    Auth
+	OTP     OTP
+	PIN     PIN
+	Catalog Catalog
+}
+
+type Catalog struct {
+	// PriceMax bounds every catalog price field, in rupiah.
+	PriceMax int64
 }
 
 type HTTP struct {
@@ -162,6 +168,8 @@ func Load() (*Config, error) {
 			Argon2Threads:   uint8(intDef("PIN_ARGON2_THREADS", 1)),
 		},
 	}
+
+	cfg.Catalog = Catalog{PriceMax: int64(intDef("CATALOG_PRICE_MAX", 100_000_000))}
 
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/auth"
+	"github.com/duniandewon/madkunyah-be-service/internal/catalog"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
@@ -28,6 +29,7 @@ type Deps struct {
 	Devices mw.DeviceChecker
 	Staff   *staff.Handler
 	POS     *pos.Handler
+	Catalog *catalog.Handler
 }
 
 func New(d Deps) *http.Server {
@@ -100,6 +102,11 @@ func Router(d Deps) http.Handler {
 			r.Delete("/{staffID}/roles/{role}", d.Staff.RevokeRole)
 		})
 
+		r.Group(func(r chi.Router) {
+			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access), mw.MaxBodyBytes(catalogBodyLimit))
+			catalogRoutes(r, d.Catalog)
+		})
+
 		r.Route("/pos", func(r chi.Router) {
 			r.Use(authn(domain.AudiencePOS), mw.RequireActiveDevice(d.Devices))
 			r.Get("/roster", d.POS.Roster)
@@ -108,6 +115,37 @@ func Router(d Deps) http.Handler {
 	})
 
 	return r
+}
+
+// catalogBodyLimit caps catalog request bodies (NFR-SEC-2).
+const catalogBodyLimit = 64 << 10
+
+// catalogRoutes mounts the dashboard catalog. Any role, outlet or global,
+// may read it; writes need catalog.manage through a global role. There is
+// no DELETE: catalog entities are archived, never removed.
+func catalogRoutes(r chi.Router, h *catalog.Handler) {
+	read := r.With(mw.RequireAnyRole)
+	write := r.With(mw.RequireGlobalPermission(domain.PermCatalogManage))
+
+	read.Get("/categories", h.ListCategories)
+	read.Get("/categories/{categoryID}", h.GetCategory)
+	write.Post("/categories", h.CreateCategory)
+	write.Patch("/categories/{categoryID}", h.UpdateCategory)
+
+	read.Get("/products", h.ListProducts)
+	read.Get("/products/{productID}", h.GetProduct)
+	write.Post("/products", h.CreateProduct)
+	write.Patch("/products/{productID}", h.UpdateProduct)
+	write.Post("/products/{productID}/variants", h.CreateVariant)
+	write.Patch("/products/{productID}/variants/{variantID}", h.UpdateVariant)
+	write.Put("/products/{productID}/modifier-groups", h.SetProductGroups)
+
+	read.Get("/modifier-groups", h.ListGroups)
+	read.Get("/modifier-groups/{groupID}", h.GetGroup)
+	write.Post("/modifier-groups", h.CreateGroup)
+	write.Patch("/modifier-groups/{groupID}", h.UpdateGroup)
+	write.Post("/modifier-groups/{groupID}/modifiers", h.CreateModifier)
+	write.Patch("/modifier-groups/{groupID}/modifiers/{modifierID}", h.UpdateModifier)
 }
 
 func healthHandler() http.HandlerFunc {

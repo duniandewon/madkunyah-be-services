@@ -12,6 +12,7 @@ import (
 
 	"github.com/duniandewon/madkunyah-be-service/internal/auth"
 	"github.com/duniandewon/madkunyah-be-service/internal/authz"
+	"github.com/duniandewon/madkunyah-be-service/internal/catalog"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
@@ -104,6 +105,7 @@ func run() error {
 		Devices: authRepo,
 		Staff:   staff.NewHandler(staffSvc),
 		POS:     pos.NewHandler(pos.NewService(pos.NewRepository(db))),
+		Catalog: catalog.NewHandler(catalog.NewService(catalog.NewRepository(db), cfg.Catalog.PriceMax)),
 	})
 
 	errCh := make(chan error, 1)

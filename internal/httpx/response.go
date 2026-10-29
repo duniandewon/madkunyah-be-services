@@ -15,6 +15,7 @@ type ErrorBody struct {
 	Message    string            `json:"message"`
 	Fields     map[string]string `json:"fields,omitempty"`
 	RetryAfter int               `json:"retry_after,omitempty"`
+	Details    any               `json:"details,omitempty"`
 }
 
 type errorEnvelope struct {
@@ -48,11 +49,12 @@ func statusFor(code domain.ErrorCode) int {
 	case domain.CodeNotFound:
 		return http.StatusNotFound
 	case domain.CodeConflict, domain.CodeShiftClosed, domain.CodeDeviceLimit,
-		domain.CodeIdentifierInUse:
+		domain.CodeIdentifierInUse, domain.CodeNameTaken, domain.CodeSKUTaken,
+		domain.CodeLastActiveVariant, domain.CodeModifierGroupUnsatisfiable, domain.CodeModifierGroupInUse:
 		return http.StatusConflict
 	case domain.CodeRateLimited, domain.CodeOTPCooldown, domain.CodeOTPQuotaExceeded:
 		return http.StatusTooManyRequests
-	case domain.CodeAuthUnavailable:
+	case domain.CodeAuthUnavailable, domain.CodeCatalogUnavailable:
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
@@ -79,7 +81,7 @@ func Error(w http.ResponseWriter, r *http.Request, err error) {
 		slog.ErrorContext(r.Context(), "server error",
 			"error", err, "code", de.Code, "path", r.URL.Path)
 	}
-	body := ErrorBody{Code: de.Code, Message: de.Message, Fields: de.Fields}
+	body := ErrorBody{Code: de.Code, Message: de.Message, Fields: de.Fields, Details: de.Details}
 	if de.RetryAfter > 0 {
 		body.RetryAfter = int(math.Ceil(de.RetryAfter.Seconds()))
 		w.Header().Set("Retry-After", strconv.Itoa(body.RetryAfter))

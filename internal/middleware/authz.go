@@ -60,6 +60,31 @@ func RequireOutletPermission(perm string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireAnyRole admits staff holding a role at any outlet or globally.
+func RequireAnyRole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a := AccessFrom(r.Context()); a == nil || !a.HasAnyRole() {
+			httpx.Error(w, r, domain.ErrForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireGlobalPermission checks a permission that must be held through a
+// global role, for resources that belong to no single outlet.
+func RequireGlobalPermission(perm string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if a := AccessFrom(r.Context()); a == nil || !a.CanGlobal(perm) {
+				httpx.Error(w, r, domain.ErrForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // AccessFrom returns the access loaded by LoadStaffAccess, or nil.
 func AccessFrom(ctx context.Context) *domain.StaffAccess {
 	a, _ := ctx.Value(accessKey).(*domain.StaffAccess)

@@ -31,6 +31,13 @@ const (
 	CodeAuthUnavailable   ErrorCode = "auth_unavailable"
 	CodeShiftClosed       ErrorCode = "shift_closed"
 	CodeInternal          ErrorCode = "internal_error"
+
+	CodeNameTaken                  ErrorCode = "name_taken"
+	CodeSKUTaken                   ErrorCode = "sku_taken"
+	CodeLastActiveVariant          ErrorCode = "last_active_variant"
+	CodeModifierGroupUnsatisfiable ErrorCode = "modifier_group_unsatisfiable"
+	CodeModifierGroupInUse         ErrorCode = "modifier_group_in_use"
+	CodeCatalogUnavailable         ErrorCode = "catalog_unavailable"
 )
 
 // Error is the single error type crossing service boundaries. The HTTP layer
@@ -42,7 +49,10 @@ type Error struct {
 	// RetryAfter is surfaced as the Retry-After header and retry_after field
 	// on rate-limit errors. Zero means not applicable.
 	RetryAfter time.Duration
-	err        error
+	// Details is extra structured context returned as-is, such as the
+	// products a rejected catalog write would affect.
+	Details any
+	err     error
 }
 
 func (e *Error) Error() string {

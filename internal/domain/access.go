@@ -15,6 +15,10 @@ const (
 	PermStaffManage  = "staff.manage"
 	PermDeviceEnroll = "device.enroll"
 	PermDeviceRevoke = "device.revoke"
+	// Catalog permissions are checked globally: the catalog is shared by
+	// every outlet, so an outlet-scoped grant does not reach it.
+	PermCatalogManage = "catalog.manage"
+	PermCostView      = "cost.view"
 )
 
 // AccessScope is the set of roles, and the permissions they carry, that a
@@ -58,6 +62,27 @@ func (a *StaffAccess) HasRole(outletID, role string) bool {
 	}
 	return slices.Contains(a.Global.Roles, role) ||
 		slices.Contains(a.Outlets[outletID].Roles, role)
+}
+
+// CanGlobal reports whether perm is held through a global role.
+func (a *StaffAccess) CanGlobal(perm string) bool {
+	return a.Active && slices.Contains(a.Global.Permissions, perm)
+}
+
+// HasAnyRole reports whether the staff member holds a role anywhere.
+func (a *StaffAccess) HasAnyRole() bool {
+	if !a.Active {
+		return false
+	}
+	if len(a.Global.Roles) > 0 {
+		return true
+	}
+	for _, scope := range a.Outlets {
+		if len(scope.Roles) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *StaffAccess) IsGlobalOwner() bool {
