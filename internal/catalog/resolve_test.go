@@ -37,7 +37,8 @@ func newFixture(t *testing.T) *fixture {
 	cost := int64(8000)
 	product := func(id uuid.UUID, name string, price int64) *quoteProduct {
 		return &quoteProduct{id: id, categoryID: cat, name: name, categoryName: "Drinks",
-			basePrice: price, active: true, catActive: true, webVisible: true, posVisible: true}
+			productDefaults: productDefaults{basePrice: price, active: true, catActive: true,
+				webVisible: true, posVisible: true}}
 	}
 	f.data = &quoteData{
 		products: map[uuid.UUID]*quoteProduct{

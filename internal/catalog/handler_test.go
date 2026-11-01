@@ -19,7 +19,7 @@ func TestPostgresDownIsUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	h := NewHandler(NewService(NewRepository(&postgres.DB{Pool: pool}), 100))
+	h := NewHandler(NewService(NewRepository(&postgres.DB{Pool: pool}), Config{PriceMax: 100}, nil))
 
 	rec := httptest.NewRecorder()
 	h.ListCategories(rec, httptest.NewRequest(http.MethodGet, "/v1/categories", nil))

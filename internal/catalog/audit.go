@@ -9,8 +9,8 @@ import (
 )
 
 const insertAudit = `
-	INSERT INTO audit_logs (id, actor_id, actor_type, action, entity_type, entity_id, value_delta, before, after)
-	VALUES ($1, $2, 'staff', $3, $4, $5, $6, $7, $8)`
+	INSERT INTO audit_logs (id, outlet_id, actor_id, actor_type, action, entity_type, entity_id, value_delta, before, after)
+	VALUES ($1, $2, $3, 'staff', $4, $5, $6, $7, $8, $9)`
 
 // Audit entity types (FR-CAUD-2).
 const (
@@ -86,13 +86,17 @@ func diff(before, after fields) (fields, fields) {
 	return b, a
 }
 
-// change is one audited catalog write.
+// change is one audited catalog write. outletID is set for outlet-scoped
+// writes (FR-OAUD-1). delta, when set, is the value_delta; otherwise it is
+// derived from the entity's price field.
 type change struct {
+	outletID   *string
 	entityType string
 	entityID   string
 	action     string
 	before     fields
 	after      fields
+	delta      *int64
 }
 
 // created audits a new entity: no before, every field after.
@@ -123,8 +127,8 @@ func updated(entityType, id string, before, after fields) (change, bool) {
 // with value_delta when an edit moved the entity's price. A creation sets a
 // price rather than changing one, so it carries none.
 func writeAudit(ctx context.Context, tx pgx.Tx, actorID string, c change) error {
-	var delta *int64
-	if f, ok := priceField[c.entityType]; ok {
+	delta := c.delta
+	if f, ok := priceField[c.entityType]; ok && delta == nil {
 		newV, okNew := c.after[f].(int64)
 		oldV, okOld := c.before[f].(int64)
 		if okNew && okOld {
@@ -132,7 +136,7 @@ func writeAudit(ctx context.Context, tx pgx.Tx, actorID string, c change) error 
 			delta = &d
 		}
 	}
-	_, err := tx.Exec(ctx, insertAudit, uuid.NewString(), actorID, c.action, c.entityType, c.entityID,
+	_, err := tx.Exec(ctx, insertAudit, uuid.NewString(), c.outletID, actorID, c.action, c.entityType, c.entityID,
 		delta, jsonOrNull(c.before), jsonOrNull(c.after))
 	if err != nil {
 		return fmt.Errorf("insert audit log: %w", err)

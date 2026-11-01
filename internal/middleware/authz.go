@@ -60,6 +60,23 @@ func RequireOutletPermission(perm string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireOutletRole admits staff holding any role reaching the {outletID}
+// outlet, directly or globally; everyone else gets 404 (FR-AZ-5).
+func RequireOutletRole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a := AccessFrom(r.Context())
+		if a == nil {
+			httpx.Error(w, r, domain.ErrForbidden)
+			return
+		}
+		if !a.Visible(chi.URLParam(r, "outletID")) {
+			httpx.Error(w, r, domain.ErrNotFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RequireAnyRole admits staff holding a role at any outlet or globally.
 func RequireAnyRole(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

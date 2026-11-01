@@ -6,19 +6,24 @@ import (
 	"github.com/google/uuid"
 )
 
-// resolve applies FR-QTE-3 and FR-MOD-4 to one line. It is the only place
-// the resolution rules live.
+// resolve applies FR-QTE-3, FR-MOD-4 and, through resolveChannel, the
+// outlet's overrides (FR-OQ-1) to one line, with sold-out evaluated at at
+// (FR-OQ-2).
 func (d *quoteData) resolve(line QuoteLine, ch Channel, at time.Time, loc *time.Location, mode QuoteMode) LineResult {
 	p := d.products[line.ProductID]
 	if p == nil {
 		return LineResult{Problems: []Problem{{Kind: ProblemProductUnavailable}}}
 	}
+	eff := resolveChannel(&p.productDefaults, ch, p.override)
 	var problems []Problem
-	if !p.active || !p.catActive || !visibleOn(p, ch) {
+	if !eff.visible {
 		problems = append(problems, Problem{Kind: ProblemProductUnavailable})
 	}
-	if !inWindow(p.window, at, loc) {
+	if !inWindow(eff.window, at, loc) {
 		problems = append(problems, Problem{Kind: ProblemOutsideWindow})
+	}
+	if p.soldOut.at(at) {
+		problems = append(problems, Problem{Kind: ProblemProductSoldOut})
 	}
 
 	snap := &LineSnapshot{
@@ -26,12 +31,12 @@ func (d *quoteData) resolve(line QuoteLine, ch Channel, at time.Time, loc *time.
 		ProductName:  p.name,
 		CategoryID:   p.categoryID,
 		CategoryName: p.categoryName,
-		BasePrice:    p.basePrice,
+		BasePrice:    eff.price,
 		UnitCost:     p.costPrice,
 		Modifiers:    []ModifierSnapshot{},
 	}
-	problems = append(problems, d.resolveVariant(line, snap)...)
-	problems = append(problems, d.resolveModifiers(line, snap)...)
+	problems = append(problems, d.resolveVariant(line, snap, at)...)
+	problems = append(problems, d.resolveModifiers(line, snap, at)...)
 	snap.UnitPrice = snap.BasePrice + snap.VariantDelta + snap.ModifiersDelta
 
 	if len(problems) > 0 && mode == Strict {
@@ -40,21 +45,10 @@ func (d *quoteData) resolve(line QuoteLine, ch Channel, at time.Time, loc *time.
 	return LineResult{Snapshot: snap, Problems: problems}
 }
 
-func visibleOn(p *quoteProduct, ch Channel) bool {
-	switch ch {
-	case ChannelWeb:
-		return p.webVisible
-	case ChannelPOS:
-		return p.posVisible
-	default:
-		return false
-	}
-}
-
 // resolveVariant enforces FR-VAR-1: exactly one active variant when the
-// product has any, none otherwise. An archived variant of this product
-// still prices the snapshot, for Record mode.
-func (d *quoteData) resolveVariant(line QuoteLine, snap *LineSnapshot) []Problem {
+// product has any, none otherwise, and not sold out at at. An archived
+// variant of this product still prices the snapshot, for Record mode.
+func (d *quoteData) resolveVariant(line QuoteLine, snap *LineSnapshot, at time.Time) []Problem {
 	variants := d.variants[line.ProductID]
 	if line.VariantID == nil {
 		for _, v := range variants {
@@ -73,6 +67,9 @@ func (d *quoteData) resolveVariant(line QuoteLine, snap *LineSnapshot) []Problem
 		if !v.active {
 			return []Problem{{Kind: ProblemVariantInvalid, ID: v.id}}
 		}
+		if v.soldOut.at(at) {
+			return []Problem{{Kind: ProblemVariantSoldOut, ID: v.id}}
+		}
 		return nil
 	}
 	return []Problem{{Kind: ProblemVariantInvalid, ID: *line.VariantID}}
@@ -80,8 +77,10 @@ func (d *quoteData) resolveVariant(line QuoteLine, snap *LineSnapshot) []Problem
 
 // resolveModifiers enforces FR-MOD-4. Every modifier that exists is priced
 // into the snapshot, valid or not, so Record mode reflects what was sold;
-// only valid ones count towards a group's min/max.
-func (d *quoteData) resolveModifiers(line QuoteLine, snap *LineSnapshot) []Problem {
+// only valid ones count towards a group's min/max. A sold-out modifier is
+// reported as such but still counts, so it is not also reported as a
+// missing selection.
+func (d *quoteData) resolveModifiers(line QuoteLine, snap *LineSnapshot, at time.Time) []Problem {
 	attached := map[uuid.UUID]quoteGroup{}
 	for _, g := range d.groups[line.ProductID] {
 		attached[g.id] = g
@@ -106,6 +105,9 @@ func (d *quoteData) resolveModifiers(line QuoteLine, snap *LineSnapshot) []Probl
 		if !ok || !g.active || !m.active {
 			problems = append(problems, Problem{Kind: ProblemModifierInvalid, ID: id})
 			continue
+		}
+		if m.soldOut.at(at) {
+			problems = append(problems, Problem{Kind: ProblemModifierSoldOut, ID: id})
 		}
 		counts[g.id]++
 	}

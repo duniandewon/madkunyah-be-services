@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"time"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/google/uuid"
@@ -29,16 +30,39 @@ type repository interface {
 
 	CreateModifier(ctx context.Context, actorID string, m *Modifier) error
 	UpdateModifier(ctx context.Context, actorID, groupID, id string, fn func(*Modifier) error) (*Modifier, error)
+
+	OutletCatalog(ctx context.Context, outletID string, includeArchived bool) ([]outletRow, error)
+	UpdateChannelSettings(ctx context.Context, actorID string, k settingsKey,
+		fn func(*ChannelSettings) error) (*ChannelResult, error)
+	ResetChannelSettings(ctx context.Context, actorID string, k settingsKey, check func(*ChannelSettings) error) error
+
+	SetSoldOut(ctx context.Context, w *SoldOutWrite, now time.Time) (*SoldOutResult, error)
+	ListSoldOut(ctx context.Context, outletID string, at time.Time) ([]SoldOutEntry, error)
+
+	PublicOutlets(ctx context.Context) ([]PublicOutlet, error)
+	Storefront(ctx context.Context, outletID string, ch Channel) (*Storefront, error)
+	RecordBundleFetch(ctx context.Context, deviceID, version string) error
+}
+
+type Config struct {
+	// PriceMax is CATALOG_PRICE_MAX, the upper bound on every price field.
+	PriceMax int64
+	// CacheTTL is CATALOG_CACHE_TTL, the lifetime of a cached menu or
+	// bundle.
+	CacheTTL time.Duration
 }
 
 type Service struct {
 	repo     repository
 	priceMax int64
+	cache    *docCache
+	now      func() time.Time
 }
 
-// NewService takes CATALOG_PRICE_MAX, the upper bound on every price field.
-func NewService(repo repository, priceMax int64) *Service {
-	return &Service{repo: repo, priceMax: priceMax}
+// NewService takes the cache store for menus and bundles; nil disables
+// caching.
+func NewService(repo repository, cfg Config, store docStore) *Service {
+	return &Service{repo: repo, priceMax: cfg.PriceMax, cache: &docCache{store: store, ttl: cfg.CacheTTL}, now: time.Now}
 }
 
 var errCostForbidden = domain.NewError(domain.CodeForbidden, "Setting cost_price requires cost.view.")
@@ -69,12 +93,13 @@ func (s *Service) CreateCategory(ctx context.Context, actor *domain.StaffAccess,
 	if err := s.repo.CreateCategory(ctx, actor.StaffID, cat); err != nil {
 		return nil, err
 	}
+	s.cache.invalidate(ctx)
 	return cat, nil
 }
 
 func (s *Service) UpdateCategory(ctx context.Context, actor *domain.StaffAccess, id string,
 	in *CategoryPatch) (*Category, error) {
-	return s.repo.UpdateCategory(ctx, actor.StaffID, id, func(cat *Category) error {
+	out, err := s.repo.UpdateCategory(ctx, actor.StaffID, id, func(cat *Category) error {
 		c := checks{}
 		if in.Name != nil {
 			cat.Name = c.name("name", *in.Name, maxCategoryName)
@@ -83,6 +108,8 @@ func (s *Service) UpdateCategory(ctx context.Context, actor *domain.StaffAccess,
 		setIf(&cat.IsActive, in.IsActive)
 		return c.err()
 	})
+	s.cache.afterWrite(ctx, err)
+	return out, err
 }
 
 func (s *Service) ListProducts(ctx context.Context, actor *domain.StaffAccess, f ProductFilter) ([]Product, error) {
@@ -131,6 +158,7 @@ func (s *Service) CreateProduct(ctx context.Context, actor *domain.StaffAccess, 
 	if err := s.repo.CreateProduct(ctx, actor.StaffID, p); err != nil {
 		return nil, err
 	}
+	s.cache.invalidate(ctx)
 	showCost(p, actor)
 	return p, nil
 }
@@ -143,6 +171,7 @@ func (s *Service) UpdateProduct(ctx context.Context, actor *domain.StaffAccess, 
 	p, err := s.repo.UpdateProduct(ctx, actor.StaffID, id, func(p *Product) error {
 		return s.applyProductPatch(p, in)
 	})
+	s.cache.afterWrite(ctx, err)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +237,9 @@ func (s *Service) SetProductGroups(ctx context.Context, actor *domain.StaffAcces
 		seen[id.String()] = true
 		ids = append(ids, id.String())
 	}
-	return s.repo.SetProductGroups(ctx, actor.StaffID, productID, ids)
+	groups, err := s.repo.SetProductGroups(ctx, actor.StaffID, productID, ids)
+	s.cache.afterWrite(ctx, err)
+	return groups, err
 }
 
 func (s *Service) CreateVariant(ctx context.Context, actor *domain.StaffAccess, productID string,
@@ -230,12 +261,13 @@ func (s *Service) CreateVariant(ctx context.Context, actor *domain.StaffAccess, 
 	if err := s.repo.CreateVariant(ctx, actor.StaffID, v); err != nil {
 		return nil, err
 	}
+	s.cache.invalidate(ctx)
 	return v, nil
 }
 
 func (s *Service) UpdateVariant(ctx context.Context, actor *domain.StaffAccess, productID, id string,
 	in *VariantPatch) (*Variant, error) {
-	return s.repo.UpdateVariant(ctx, actor.StaffID, productID, id, func(v *Variant) error {
+	out, err := s.repo.UpdateVariant(ctx, actor.StaffID, productID, id, func(v *Variant) error {
 		c := checks{}
 		if in.Name != nil {
 			v.Name = c.name("name", *in.Name, maxVariantName)
@@ -249,6 +281,8 @@ func (s *Service) UpdateVariant(ctx context.Context, actor *domain.StaffAccess, 
 		c.price("price_delta", v.PriceDelta, s.priceMax)
 		return c.err()
 	})
+	s.cache.afterWrite(ctx, err)
+	return out, err
 }
 
 func (s *Service) ListGroups(ctx context.Context, includeArchived bool) ([]ModifierGroup, error) {
@@ -278,12 +312,13 @@ func (s *Service) CreateGroup(ctx context.Context, actor *domain.StaffAccess, in
 	if err := s.repo.CreateGroup(ctx, actor.StaffID, g); err != nil {
 		return nil, err
 	}
+	s.cache.invalidate(ctx)
 	return g, nil
 }
 
 func (s *Service) UpdateGroup(ctx context.Context, actor *domain.StaffAccess, id string,
 	in *GroupPatch) (*ModifierGroup, error) {
-	return s.repo.UpdateGroup(ctx, actor.StaffID, id, func(g *ModifierGroup) error {
+	out, err := s.repo.UpdateGroup(ctx, actor.StaffID, id, func(g *ModifierGroup) error {
 		c := checks{}
 		if in.Name != nil {
 			g.Name = c.name("name", *in.Name, maxGroupName)
@@ -294,6 +329,8 @@ func (s *Service) UpdateGroup(ctx context.Context, actor *domain.StaffAccess, id
 		c.selectRange(g.MinSelect, g.MaxSelect)
 		return c.err()
 	})
+	s.cache.afterWrite(ctx, err)
+	return out, err
 }
 
 func (s *Service) CreateModifier(ctx context.Context, actor *domain.StaffAccess, groupID string,
@@ -314,12 +351,13 @@ func (s *Service) CreateModifier(ctx context.Context, actor *domain.StaffAccess,
 	if err := s.repo.CreateModifier(ctx, actor.StaffID, m); err != nil {
 		return nil, err
 	}
+	s.cache.invalidate(ctx)
 	return m, nil
 }
 
 func (s *Service) UpdateModifier(ctx context.Context, actor *domain.StaffAccess, groupID, id string,
 	in *ModifierPatch) (*Modifier, error) {
-	return s.repo.UpdateModifier(ctx, actor.StaffID, groupID, id, func(m *Modifier) error {
+	out, err := s.repo.UpdateModifier(ctx, actor.StaffID, groupID, id, func(m *Modifier) error {
 		c := checks{}
 		if in.Name != nil {
 			m.Name = c.name("name", *in.Name, maxModifierName)
@@ -330,6 +368,8 @@ func (s *Service) UpdateModifier(ctx context.Context, actor *domain.StaffAccess,
 		c.price("price_delta", m.PriceDelta, s.priceMax)
 		return c.err()
 	})
+	s.cache.afterWrite(ctx, err)
+	return out, err
 }
 
 // canonicalID lowercases a UUID the handler has already validated, so a

@@ -24,6 +24,13 @@ type Config struct {
 type Catalog struct {
 	// PriceMax bounds every catalog price field, in rupiah.
 	PriceMax int64
+	// CacheTTL bounds how long a cached menu or POS bundle lives. Writes
+	// invalidate through the generation counter; the TTL bounds staleness
+	// when that bump fails.
+	CacheTTL time.Duration
+	// PublicRateLimit is the per-IP request budget per minute on the public
+	// outlet and menu routes.
+	PublicRateLimit int
 }
 
 type HTTP struct {
@@ -169,7 +176,11 @@ func Load() (*Config, error) {
 		},
 	}
 
-	cfg.Catalog = Catalog{PriceMax: int64(intDef("CATALOG_PRICE_MAX", 100_000_000))}
+	cfg.Catalog = Catalog{
+		PriceMax:        int64(intDef("CATALOG_PRICE_MAX", 100_000_000)),
+		CacheTTL:        durDef("CATALOG_CACHE_TTL", 5*time.Minute),
+		PublicRateLimit: intDef("CATALOG_PUBLIC_RATE_LIMIT", 120),
+	}
 
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))

@@ -19,6 +19,10 @@ const (
 	// every outlet, so an outlet-scoped grant does not reach it.
 	PermCatalogManage = "catalog.manage"
 	PermCostView      = "cost.view"
+	// Outlet-scoped catalog permissions: what an outlet shows and what has
+	// run out there.
+	PermAvailabilityManage = "product.availability.manage"
+	PermSoldOutToggle      = "product.sold_out.toggle"
 )
 
 // AccessScope is the set of roles, and the permissions they carry, that a

@@ -17,6 +17,7 @@ import (
 
 	mw "github.com/duniandewon/madkunyah-be-service/internal/middleware"
 	credis "github.com/duniandewon/madkunyah-be-service/platform/redis"
+	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
 type Deps struct {
@@ -105,12 +106,23 @@ func Router(d Deps) http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access), mw.MaxBodyBytes(catalogBodyLimit))
 			catalogRoutes(r, d.Catalog)
+			outletCatalogRoutes(r, d.Catalog)
+		})
+
+		// Public: the online shop browses without signing in.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RateLimitIP(d.Redis, "catalog_public", d.Config.Catalog.PublicRateLimit, time.Minute))
+			r.Get("/outlets", d.Catalog.PublicOutlets)
+			r.With(compress).Get("/outlets/{outletID}/menu", d.Catalog.Menu)
 		})
 
 		r.Route("/pos", func(r chi.Router) {
 			r.Use(authn(domain.AudiencePOS), mw.RequireActiveDevice(d.Devices))
 			r.Get("/roster", d.POS.Roster)
 			r.Post("/pin-failures", d.POS.PINFailures)
+			r.With(compress).Get("/catalog", d.Catalog.Bundle)
+			r.With(mw.MaxBodyBytes(catalogBodyLimit), mw.RequireActingStaff(d.Access)).
+				Put("/sold-out", d.Catalog.POSSetSoldOut)
 		})
 	})
 
@@ -119,6 +131,10 @@ func Router(d Deps) http.Handler {
 
 // catalogBodyLimit caps catalog request bodies (NFR-SEC-2).
 const catalogBodyLimit = 64 << 10
+
+// compress gzips the menu and the POS bundle, the two large catalog
+// responses (NFR-PERF-2).
+var compress = chimw.Compress(5, "application/json")
 
 // catalogRoutes mounts the dashboard catalog. Any role, outlet or global,
 // may read it; writes need catalog.manage through a global role. There is
@@ -146,6 +162,18 @@ func catalogRoutes(r chi.Router, h *catalog.Handler) {
 	write.Patch("/modifier-groups/{groupID}", h.UpdateGroup)
 	write.Post("/modifier-groups/{groupID}/modifiers", h.CreateModifier)
 	write.Patch("/modifier-groups/{groupID}/modifiers/{modifierID}", h.UpdateModifier)
+}
+
+// outletCatalogRoutes mounts the per-outlet catalog. Every route needs a
+// role reaching the outlet (404 otherwise); settings writes check each
+// field's permission in the service (FR-OUT-4).
+func outletCatalogRoutes(r chi.Router, h *catalog.Handler) {
+	r = r.With(mw.RequireOutletRole)
+	r.Get("/outlets/{outletID}/catalog", h.OutletCatalog)
+	r.Put("/outlets/{outletID}/products/{productID}/channels/{channel}", h.SetChannelSettings)
+	r.Delete("/outlets/{outletID}/products/{productID}/channels/{channel}", h.ResetChannelSettings)
+	r.Get("/outlets/{outletID}/sold-out", h.ListSoldOut)
+	r.With(mw.RequireOutletPermission(domain.PermSoldOutToggle)).Put("/outlets/{outletID}/sold-out", h.SetSoldOut)
 }
 
 func healthHandler() http.HandlerFunc {

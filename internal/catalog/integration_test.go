@@ -60,7 +60,7 @@ func newEnv(t *testing.T) *env {
 	return &env{
 		t:   t,
 		ctx: context.Background(),
-		svc: NewService(NewRepository(testDB), 100_000_000),
+		svc: NewService(NewRepository(testDB), Config{PriceMax: 100_000_000}, nil),
 		owner: &domain.StaffAccess{StaffID: uuid.NewString(), Active: true, Global: domain.AccessScope{
 			Roles: []string{domain.RoleOwner}, Permissions: []string{domain.PermCatalogManage, domain.PermCostView},
 		}},

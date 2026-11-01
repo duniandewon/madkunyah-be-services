@@ -1,6 +1,6 @@
-# Current Feature
+# Current Feature: Outlet Catalog
 
-<!-- Feature name and short description -->
+Per-outlet, per-channel overrides of the global catalog, outlet sold-out state, the public outlet list and web menu, the versioned POS catalog bundle, and Redis caching for menu and bundle. Spec: `context/features/outlet-catalog-spec.md`.
 
 ## Status
 
@@ -12,9 +12,31 @@ Completed
 
 <!-- Goals and requirements -->
 
+- Migration `0004_outlet_catalog`: `product_channel_settings` (PK `(product_id, outlet_id, channel)`, `channel ∈ web|pos`, nullable `price`/`is_visible`/window = inherit), `outlet_sold_out` (exactly one of product/variant/modifier, partial unique indexes per outlet, rows kept when cleared), `devices.catalog_version` INT → nullable TEXT, add `devices.catalog_fetched_at`
+- Resolution (FR-OUT-2): visible = category active ∧ product active ∧ `coalesce(row.is_visible, p.is_<c>_visible)`; price = `coalesce(row.price, base_price)`; window = row window, else product window, else none. Opt-out by default (new products/outlets inherit). Table-driven unit test (AC-1)
+- `PUT`/`DELETE /v1/outlets/{outlet_id}/products/{product_id}/channels/{channel}`: `is_visible` + window need `product.availability.manage` at the outlet, `price` needs global `catalog.manage`; any forbidden field rejects the whole request (403). Active outlet + existing product only; archived products editable
+- `GET /v1/outlets/{outlet_id}/catalog`: every product with per-channel override row and resolved visible/price/window; `cost_price` per Catalog Core FR-PRD-7
+- Sold out (per outlet, both channels): `PUT /v1/outlets/{outlet_id}/sold-out` (staff) and `PUT /v1/pos/sold-out` (pos + `RequireActingStaff`, server-side authz, first mount), both `product.sold_out.toggle`. `scope today|indefinite` (today = next business-day cutoff in outlet tz), expiry evaluated at read time, no job. Idempotent (`applied: false`, no audit), POS `changed_at` clamped to server time and older-than-stored ignored. Inactive/unknown target → 404. `GET /v1/outlets/{outlet_id}/sold-out` lists current items with who/when
+- Sold-out effect on orderable: sold-out product not orderable (still listed, flagged); all active variants sold out → not orderable; required group with fewer than `min_select` remaining modifiers → not orderable
+- Extend `catalog.Quote` (signature unchanged, Postgres only): apply overrides for the request's outlet + channel, check sold-out at `At` for product, variant, each modifier; new problem kinds `product_sold_out`, `variant_sold_out`, `modifier_sold_out`; keep p95 ≤ 10 ms / 20 lines
+- Public `GET /v1/outlets` (active outlets: id, name, address, phone, timezone) and `GET /v1/outlets/{id}/menu` (web-visible only, empty categories omitted, Catalog Core ordering, per-request `price`/`orderable`/`sold_out`/`in_window`/`window`; no `cost_price`, SKUs, staff IDs, override metadata). `ETag` + `Cache-Control: no-cache`, `304` on match. Unknown/inactive outlet → 404. Per-IP rate limit `CATALOG_PUBLIC_RATE_LIMIT` (120/min) → 429 `rate_limited`
+- `GET /v1/pos/catalog` (active device, device's outlet): pos-visible products at effective POS price, variants, groups, modifiers, raw windows and sold-out rows, outlet `timezone` + `business_day_cutoff`. `version` = SHA-256 of canonical JSON (time-independent), `ETag`/`If-None-Match` → 304; record `devices.catalog_version` + `catalog_fetched_at` on 200 and 304. Version is never a rejection reason
+- Redis cache: `catalog:gen` counter, `catalog:menu:{gen}:{outlet_id}` and `catalog:bundle:{gen}:{outlet_id}` with `CATALOG_CACHE_TTL` (5m). Every catalog write (Catalog Core included) does `INCR catalog:gen` after commit; readers read gen before Postgres. Redis failure on read → bypass to Postgres; INCR failure → log, write still succeeds. Postgres down → 503 `catalog_unavailable`
+- Audit (same transaction, `outlet_id` set, changed fields only): `outlet_product.updated` (with `value_delta` on effective price change), `outlet_product.reset`, `sold_out.set`, `sold_out.cleared`; POS rows name the acting staff and include `device_id` + client `changed_at`. No row for no-ops
+- Injectable clock for windows, cutoff, and sold-out expiry; integration tests AC-1..AC-22 on `TEST_DATABASE_URL`; E2E script; golangci-lint clean
+
 ## Notes
 
 <!-- Any extra notes -->
+
+- No new permission strings. Global role holders count as having a role at every outlet; no role at outlet → 404 (FR-AZ-5), except POS sold-out with a staff member lacking the role → 403
+- `devices.catalog_version` currently exists in `0001_auth` as `INT NOT NULL DEFAULT 0`, so the spec's ALTER statements apply as written
+- `outlets.business_day_cutoff` already exists (`TIME NOT NULL DEFAULT '04:00'`)
+- Only the product price is overridable; variant and modifier deltas stay global. Outlet windows replace, never remove, the product window
+- 64 KB body cap on all routes here (reuse the catalog middleware)
+- Error codes: `validation_failed` (reuses `invalid_input`, as in Catalog Core), `forbidden`, `not_found`, `device_revoked`, new `rate_limited` (check whether one already exists), `catalog_unavailable`
+- Deferred (decided at start, same as Catalog Core): Prometheus metrics (§7) — log the metric points instead; OpenAPI (NFR-OPS-4); testcontainers-go (NFR-OPS-3) — integration tests run on `TEST_DATABASE_URL` + the configured Redis
+- Out of scope: variant/modifier per-outlet pricing, removing a product window at one outlet, push updates (SSE/WS), sold-out via `/v1/sync/batch`, outlet management, stock-based blocking, product images
 
 ## History
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
+	"github.com/go-chi/chi/v5"
 )
 
 func serveWith(mw func(http.Handler) http.Handler, a *domain.StaffAccess) int {
@@ -51,5 +52,46 @@ func TestCatalogAccess(t *testing.T) {
 				t.Errorf("write = %d, want %d", got, tt.write)
 			}
 		})
+	}
+}
+
+// AC-3, E-4, FR-AZ-5: outlet catalog routes are 404 to staff with no role
+// reaching the outlet; global role holders reach every outlet.
+func TestRequireOutletRole(t *testing.T) {
+	serve := func(a *domain.StaffAccess, outlet string) int {
+		r := chi.NewRouter()
+		r.With(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if a != nil {
+					req = req.WithContext(context.WithValue(req.Context(), accessKey, a))
+				}
+				next.ServeHTTP(w, req)
+			})
+		}, RequireOutletRole).Get("/outlets/{outletID}/catalog", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/outlets/"+outlet+"/catalog", nil))
+		return rec.Code
+	}
+	managerA := &domain.StaffAccess{Active: true, Outlets: map[string]domain.AccessScope{
+		"a": {Roles: []string{domain.RoleManager}, Permissions: []string{domain.PermAvailabilityManage}}}}
+	owner := &domain.StaffAccess{Active: true, Global: domain.AccessScope{Roles: []string{domain.RoleOwner}}}
+	tests := []struct {
+		name   string
+		access *domain.StaffAccess
+		outlet string
+		want   int
+	}{
+		{"manager at own outlet", managerA, "a", 200},
+		{"manager at other outlet", managerA, "b", 404},
+		{"global owner anywhere", owner, "b", 200},
+		{"deactivated", &domain.StaffAccess{Outlets: managerA.Outlets}, "a", 404},
+		{"no access loaded", nil, "a", 403},
+	}
+	for _, tt := range tests {
+		if got := serve(tt.access, tt.outlet); got != tt.want {
+			t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
+		}
 	}
 }

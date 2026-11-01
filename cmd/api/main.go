@@ -105,7 +105,10 @@ func run() error {
 		Devices: authRepo,
 		Staff:   staff.NewHandler(staffSvc),
 		POS:     pos.NewHandler(pos.NewService(pos.NewRepository(db))),
-		Catalog: catalog.NewHandler(catalog.NewService(catalog.NewRepository(db), cfg.Catalog.PriceMax)),
+		Catalog: catalog.NewHandler(catalog.NewService(catalog.NewRepository(db), catalog.Config{
+			PriceMax: cfg.Catalog.PriceMax,
+			CacheTTL: cfg.Catalog.CacheTTL,
+		}, rdb)),
 	})
 
 	errCh := make(chan error, 1)

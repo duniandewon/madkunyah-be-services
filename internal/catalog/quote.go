@@ -60,6 +60,9 @@ const (
 	ProblemVariantInvalid       ProblemKind = "variant_invalid"
 	ProblemModifierInvalid      ProblemKind = "modifier_invalid"
 	ProblemModifierCountInvalid ProblemKind = "modifier_count_invalid"
+	ProblemProductSoldOut       ProblemKind = "product_sold_out"
+	ProblemVariantSoldOut       ProblemKind = "variant_sold_out"
+	ProblemModifierSoldOut      ProblemKind = "modifier_sold_out"
 )
 
 // Problem names the offending variant, modifier or modifier group in ID, or
@@ -71,12 +74,14 @@ type Problem struct {
 
 // LineSnapshot is what an order line copies at sale time (FR-QTE-4).
 type LineSnapshot struct {
-	ProductID      uuid.UUID
-	ProductName    string
-	CategoryID     uuid.UUID
-	CategoryName   string
-	VariantID      *uuid.UUID
-	VariantName    *string
+	ProductID    uuid.UUID
+	ProductName  string
+	CategoryID   uuid.UUID
+	CategoryName string
+	VariantID    *uuid.UUID
+	VariantName  *string
+	// BasePrice is the product price at the outlet on the channel: the
+	// outlet override when set, else products.base_price.
 	BasePrice      int64
 	VariantDelta   int64
 	ModifiersDelta int64
@@ -122,18 +127,28 @@ var ErrOutletUnavailable = errors.New("catalog: outlet unavailable")
 const (
 	quoteOutlet = `SELECT timezone FROM outlets WHERE id = $1 AND is_active`
 
+	// Each query takes the outlet's override for the channel and the
+	// outlet's sold-out rows along, so overrides and sold-out cost no extra
+	// round trip.
 	quoteProducts = `
 		SELECT p.id, p.name, p.base_price, p.cost_price, p.is_active,
 		       p.is_web_visible, p.is_pos_visible,
 		       to_char(p.available_from, 'HH24:MI'), to_char(p.available_to, 'HH24:MI'),
-		       c.id, c.name, c.is_active
+		       c.id, c.name, c.is_active,
+		       s.product_id IS NOT NULL, s.price, s.is_visible,
+		       to_char(s.available_from, 'HH24:MI'), to_char(s.available_to, 'HH24:MI'),
+		       so.id IS NOT NULL, so.sold_out_until
 		FROM products p
 		JOIN categories c ON c.id = p.category_id
+		LEFT JOIN product_channel_settings s ON s.product_id = p.id AND s.outlet_id = $2 AND s.channel = $3
+		LEFT JOIN outlet_sold_out so ON so.product_id = p.id AND so.outlet_id = $2 AND so.is_sold_out
 		WHERE p.id = ANY($1)`
 
 	quoteVariants = `
-		SELECT id, product_id, name, price_delta, is_active
-		FROM product_variants WHERE product_id = ANY($1)`
+		SELECT v.id, v.product_id, v.name, v.price_delta, v.is_active, so.id IS NOT NULL, so.sold_out_until
+		FROM product_variants v
+		LEFT JOIN outlet_sold_out so ON so.product_variant_id = v.id AND so.outlet_id = $2 AND so.is_sold_out
+		WHERE v.product_id = ANY($1)`
 
 	quoteGroups = `
 		SELECT pmg.product_id, g.id, g.min_select, g.max_select, g.is_active
@@ -142,14 +157,16 @@ const (
 		WHERE pmg.product_id = ANY($1)`
 
 	quoteModifiers = `
-		SELECT id, modifier_group_id, name, price_delta, is_active
-		FROM modifiers WHERE id = ANY($1)`
+		SELECT m.id, m.modifier_group_id, m.name, m.price_delta, m.is_active, so.id IS NOT NULL, so.sold_out_until
+		FROM modifiers m
+		LEFT JOIN outlet_sold_out so ON so.modifier_id = m.id AND so.outlet_id = $2 AND so.is_sold_out
+		WHERE m.id = ANY($1)`
 )
 
 // Quote validates and prices order lines against the catalog in Postgres,
-// never a cache. It runs a fixed number of queries whatever the line count
-// (NFR-PERF-1). Outlet Catalog extends it with outlet overrides and
-// sold-out; callers do not change (FR-QTE-7).
+// never a cache (FR-OQ-4). It runs a fixed number of queries whatever the
+// line count (NFR-PERF-1). Prices, visibility and windows are the outlet's
+// for the channel (FR-OQ-1); sold-out is evaluated at At (FR-OQ-2).
 func Quote(ctx context.Context, q Querier, req QuoteRequest) (QuoteResult, error) {
 	var tz string
 	if err := q.QueryRow(ctx, quoteOutlet, req.OutletID).Scan(&tz); err != nil {
@@ -162,7 +179,7 @@ func Quote(ctx context.Context, q Querier, req QuoteRequest) (QuoteResult, error
 	if err != nil {
 		return QuoteResult{}, fmt.Errorf("outlet timezone %q: %w", tz, err)
 	}
-	data, err := loadQuoteData(ctx, q, req.Lines)
+	data, err := loadQuoteData(ctx, q, req)
 	if err != nil {
 		return QuoteResult{}, err
 	}
@@ -174,14 +191,12 @@ func Quote(ctx context.Context, q Querier, req QuoteRequest) (QuoteResult, error
 }
 
 type quoteProduct struct {
+	productDefaults
 	id, categoryID     uuid.UUID
 	name, categoryName string
-	basePrice          int64
 	costPrice          *int64
-	active, catActive  bool
-	webVisible         bool
-	posVisible         bool
-	window             *window
+	override           *override
+	soldOut            soldOut
 }
 
 type quoteVariant struct {
@@ -189,6 +204,7 @@ type quoteVariant struct {
 	name          string
 	priceDelta    int64
 	active        bool
+	soldOut       soldOut
 }
 
 type quoteGroup struct {
@@ -202,6 +218,7 @@ type quoteModifier struct {
 	name        string
 	priceDelta  int64
 	active      bool
+	soldOut     soldOut
 }
 
 // quoteData is the catalog slice a quote needs, keyed for resolve.
@@ -212,7 +229,8 @@ type quoteData struct {
 	modifiers map[uuid.UUID]*quoteModifier
 }
 
-func loadQuoteData(ctx context.Context, q Querier, lines []QuoteLine) (*quoteData, error) {
+func loadQuoteData(ctx context.Context, q Querier, req QuoteRequest) (*quoteData, error) {
+	lines := req.Lines
 	d := &quoteData{
 		products:  map[uuid.UUID]*quoteProduct{},
 		variants:  map[uuid.UUID][]quoteVariant{},
@@ -228,50 +246,59 @@ func loadQuoteData(ctx context.Context, q Querier, lines []QuoteLine) (*quoteDat
 		productIDs = append(productIDs, l.ProductID)
 		modifierIDs = append(modifierIDs, l.ModifierIDs...)
 	}
-	if err := d.loadProducts(ctx, q, productIDs); err != nil {
+	if err := d.loadProducts(ctx, q, productIDs, req.OutletID, req.Channel); err != nil {
 		return nil, err
 	}
-	if err := d.loadVariants(ctx, q, productIDs); err != nil {
+	if err := d.loadVariants(ctx, q, productIDs, req.OutletID); err != nil {
 		return nil, err
 	}
 	if err := d.loadGroups(ctx, q, productIDs); err != nil {
 		return nil, err
 	}
-	if err := d.loadModifiers(ctx, q, modifierIDs); err != nil {
+	if err := d.loadModifiers(ctx, q, modifierIDs, req.OutletID); err != nil {
 		return nil, err
 	}
 	return d, nil
 }
 
-func (d *quoteData) loadProducts(ctx context.Context, q Querier, ids []uuid.UUID) error {
-	rows, err := q.Query(ctx, quoteProducts, ids)
+func (d *quoteData) loadProducts(ctx context.Context, q Querier, ids []uuid.UUID, outletID uuid.UUID, ch Channel) error {
+	rows, err := q.Query(ctx, quoteProducts, ids, outletID, string(ch))
 	if err != nil {
 		return fmt.Errorf("quote products: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var p quoteProduct
-		var from, to *string
+		var from, to, oFrom, oTo *string
+		var hasOverride bool
+		o := &override{}
 		if err := rows.Scan(&p.id, &p.name, &p.basePrice, &p.costPrice, &p.active,
 			&p.webVisible, &p.posVisible, &from, &to,
-			&p.categoryID, &p.categoryName, &p.catActive); err != nil {
+			&p.categoryID, &p.categoryName, &p.catActive,
+			&hasOverride, &o.price, &o.visible, &oFrom, &oTo,
+			&p.soldOut.set, &p.soldOut.until); err != nil {
 			return fmt.Errorf("scan quote product: %w", err)
 		}
 		p.window = newWindow(from, to)
+		if hasOverride {
+			o.window = newWindow(oFrom, oTo)
+			p.override = o
+		}
 		d.products[p.id] = &p
 	}
 	return rows.Err()
 }
 
-func (d *quoteData) loadVariants(ctx context.Context, q Querier, productIDs []uuid.UUID) error {
-	rows, err := q.Query(ctx, quoteVariants, productIDs)
+func (d *quoteData) loadVariants(ctx context.Context, q Querier, productIDs []uuid.UUID, outletID uuid.UUID) error {
+	rows, err := q.Query(ctx, quoteVariants, productIDs, outletID)
 	if err != nil {
 		return fmt.Errorf("quote variants: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var v quoteVariant
-		if err := rows.Scan(&v.id, &v.productID, &v.name, &v.priceDelta, &v.active); err != nil {
+		if err := rows.Scan(&v.id, &v.productID, &v.name, &v.priceDelta, &v.active,
+			&v.soldOut.set, &v.soldOut.until); err != nil {
 			return fmt.Errorf("scan quote variant: %w", err)
 		}
 		d.variants[v.productID] = append(d.variants[v.productID], v)
@@ -296,18 +323,19 @@ func (d *quoteData) loadGroups(ctx context.Context, q Querier, productIDs []uuid
 	return rows.Err()
 }
 
-func (d *quoteData) loadModifiers(ctx context.Context, q Querier, ids []uuid.UUID) error {
+func (d *quoteData) loadModifiers(ctx context.Context, q Querier, ids []uuid.UUID, outletID uuid.UUID) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := q.Query(ctx, quoteModifiers, ids)
+	rows, err := q.Query(ctx, quoteModifiers, ids, outletID)
 	if err != nil {
 		return fmt.Errorf("quote modifiers: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m quoteModifier
-		if err := rows.Scan(&m.id, &m.groupID, &m.name, &m.priceDelta, &m.active); err != nil {
+		if err := rows.Scan(&m.id, &m.groupID, &m.name, &m.priceDelta, &m.active,
+			&m.soldOut.set, &m.soldOut.until); err != nil {
 			return fmt.Errorf("scan quote modifier: %w", err)
 		}
 		d.modifiers[m.id] = &m
