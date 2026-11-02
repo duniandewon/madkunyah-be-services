@@ -1,53 +1,20 @@
-# Current Feature: Code Scanner Quick Wins
+# Current Feature
 
 <!-- Feature name and short description -->
-
-Small, self-contained hardening fixes from the code-scanner findings of 2026-11-02. IDs (H1, M5, ...) refer to that scan.
 
 ## Status
 
 <!-- Not started | In Progress | Completed -->
 
-In Progress
+Completed
 
 ## Goals
 
 <!-- Goals and requirements -->
 
-**Security**
-
-- **H1:** `httpx.ClientIP` (`internal/httpx/request.go`) honours `X-Forwarded-For` and `X-Real-IP` only when `RemoteAddr` is in a new `TRUSTED_PROXIES` CIDR list, taking the right-most untrusted `X-Forwarded-For` hop. Otherwise it uses `RemoteAddr`.
-- **H2:** Plaintext OTP codes are logged only with an explicit `OTP_LOG_CODES=true`, never because of `APP_ENV`. Startup fails if `APP_ENV` is unset, if `OTP_LOG_CODES=true` in production, or if `CORS_ORIGINS=*` in production.
-- **L2:** `canResetPIN` (`internal/staff/rules.go`) applies the role hierarchy to the target's roles, so a manager can't reset an owner's PIN.
-
-**Reliability**
-
-- **M5:** Staff routes reject a malformed `outletID` with 404 instead of 500 (`internal/staff/handler.go`).
-- **M6:** `Migrate` holds a `pg_advisory_lock` throughout and reads applied versions after acquiring it (`platform/postgres/migrate.go`).
-- **L5:** The notification goroutine in `internal/auth/dispatch.go` recovers from panics and logs them.
-- **L6:** Set-but-invalid env values fail startup instead of using defaults. Values cast to `uint32`, `uint8` or `int32` are range checked, and `OTP_PEPPER` and `OTP_LENGTH` are bounded (`internal/config/config.go`).
-- **L7:** The HTTP server sets `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes` (`internal/server/server.go`).
-
-**Housekeeping**
-
-- **L8 (part):** Set `MaxConnLifetime` on the Postgres pool, and add an index on `devices.outlet_id` in a new migration.
-- **L9 (part):** Rename `internal/middleware/observibility.go` to `observability.go`, and name the magic-number durations in `internal/server/server.go` and `internal/auth/otp.go`.
-
 ## Notes
 
 <!-- Any extra notes -->
-
-- The scan only read the code and didn't consult `context/project-overview.md` or `context/spec/`. Confirm each finding against the code and spec before fixing it, especially L2 against FR-AZ-6.
-- **Deploy changes:** `APP_ENV` becomes required. Any deployment behind a proxy must set `TRUSTED_PROXIES`, or all clients share the proxy's IP and its rate limits. Add the new variables to `.env` and any env example.
-- **Left out because they need design work or a decision:**
-  - M1: versioned authz cache
-  - M2: subject-level access-token revocation and Redis-down behaviour
-  - M3: acting-staff proof on POS
-  - M4: POS refresh grace binding
-  - L1: credentialed CORS, which depends on frontend domains
-  - L3: OTP lockout and overwrite
-  - L4: PIN-failure sync checks
-- **Left out as not quick:** the rest of L8 (Redis pool options, append-only `audit_logs`, down migrations) and the rest of L9 (doc comments, long functions, `any` usage).
 
 ## History
 
@@ -63,3 +30,4 @@ In Progress
 - **2026-10-29** — Catalog core (`feature/catalog-core`): migration `0003_catalog_core` (categories, products, product_variants, modifier_groups, modifiers, product_modifier_groups; partial unique indexes on active names, never-reused SKU indexes). `internal/catalog` dashboard routes: GET for any role (outlet or global), POST/PATCH/PUT need global `catalog.manage`, no DELETE (archive/restore via `PATCH {is_active}`, `include_archived=true`). `cost_price` absent unless `cost.view` (global); writing it needs both. SKUs unique across products and variants under an advisory lock. Guards: `409 last_active_variant`, `409 modifier_group_unsatisfiable` (attach, min_select raise, modifier archive, plus product/group restore) and `409 modifier_group_in_use`, both listing affected products in the new error `details`; row locks serialize each guard. `PUT /v1/products/{id}/modifier-groups` takes `{"modifier_group_ids": [...]}` (order = sort order). One `audit_logs` row per change in the same transaction, changed fields only, `value_delta` on price edits (not creation), none for no-op PATCH. `catalog.Quote(ctx, q, req)` reads Postgres in the caller's transaction with at most 5 queries (~1.6 ms p95 for 20 lines), outlet-local `[from, to)` windows wrapping midnight, six problem kinds, `Strict`/`Record` modes, `ErrOutletUnavailable`. New codes `name_taken`, `sku_taken`, `last_active_variant`, `modifier_group_unsatisfiable`, `modifier_group_in_use`, `catalog_unavailable` (503); `validation_failed` reuses `invalid_input`. 64 KB body cap on catalog routes, `CATALOG_PRICE_MAX`. Verified: unit tests (resolver table, windows, middleware, decoding, 503), integration tests AC-1..AC-19 + restore race on `TEST_DATABASE_URL` (`madkunyah_test`), catalog E2E 73/73, golangci-lint clean. Deferred: Prometheus metrics (§7), OpenAPI (NFR-OPS-4), testcontainers-go. Out of scope: outlet overrides, sold-out, public menu, POS bundle (Outlet Catalog); images; combos; stock/recipes.
 
 - **2026-11-01** — Outlet catalog (`feature/outlet-catalog`): migration `0004_outlet_catalog` (`product_channel_settings` keyed by product/outlet/channel with null = inherit; `outlet_sold_out` for exactly one of product/variant/modifier, rows kept when cleared; `devices.catalog_version` → nullable text hash, `catalog_fetched_at`). One resolver (`resolveChannel`, FR-OUT-2) serves Quote, menu, bundle and the dashboard view. Dashboard: `GET /v1/outlets/{id}/catalog` (both channels, override + resolved, `include_archived`), `PUT`/`DELETE …/products/{pid}/channels/{web|pos}` (PUT sets fields present, absent fields kept; price needs global `catalog.manage`, visibility/window need `product.availability.manage` at the outlet; any forbidden field → 403 and nothing written; DELETE of a priced row needs `catalog.manage`), `GET`/`PUT …/sold-out` (`product.sold_out.toggle`). Sold out: `today` = next business-day cutoff after the tap in outlet tz, `indefinite` = null; expiry evaluated on read; repeats and older POS `changed_at` → `applied: false`, future times clamped; unknown/archived target → 404. `PUT /v1/pos/sold-out` is the first route behind `RequireActingStaff`, permission checked server side. Quote applies overrides and sold-out at `At` (new kinds `product_sold_out`, `variant_sold_out`, `modifier_sold_out`), still 5 queries, ~1.5 ms p95 for 20 lines. Public `GET /v1/outlets` and `GET /v1/outlets/{id}/menu` (web-visible only, per-request `orderable`/`sold_out`/`in_window`, ETag/304, `Cache-Control: no-cache`, gzip, per-IP limit `CATALOG_PUBLIC_RATE_LIMIT` → 429 `rate_limited`). `GET /v1/pos/catalog`: raw rules, content-hash version, ETag/304, device version recorded on every fetch. Redis cache `catalog:gen` + `catalog:{menu,bundle}:{gen}:{outlet}` (`CATALOG_CACHE_TTL`), bumped after every catalog write including Catalog Core; cache and limiter calls time out at 150 ms and fall back to Postgres / fail open. Audit rows with `outlet_id` (`outlet_product.updated/reset` with `value_delta` and `channel`, `sold_out.set/cleared` with device and client `changed_at` on POS), none for no-ops. Verified: unit tests (resolution matrix, cutoff, sold-out decisions, orderable, version, rate limit, outlet role), integration tests AC-1..AC-22 on `madkunyah_test` with an in-memory cache store, E2E 93/93 on real Postgres + Redis, Redis-down check (menu 0.31 s), golangci-lint clean. Deferred: Prometheus metrics, OpenAPI, testcontainers-go, AC-23 (manual, POS hardware). Follow-up: the auth token-denylist check has no Redis timeout, so POS routes take ~1.9 s while Redis is down.
+- **2026-11-02** — Code scanner quick wins (`feature/code-scanner-quick-wins`): hardening fixes from the 2026-11-02 scan. `TRUSTED_PROXIES` (CIDRs): forwarding headers honoured only from those peers, right-most untrusted `X-Forwarded-For` hop, resolved once by the `ClientIP` middleware; `httpx.ClientIP` never reads headers. `APP_ENV` required; `OTP_LOG_CODES` opt-in for plaintext codes; production refuses it and wildcard CORS. PIN reset applies the role hierarchy on top of FR-PIN-5 (managers can't reset an owner, fellow manager or global role holder; self-reset allowed). Malformed `outletID` on staff routes → 404. `Migrate` holds an advisory lock on one connection. OTP dispatch goroutine recovers from panics. Set-but-invalid env values fail startup, with range checks and `OTP_PEPPER` at least 32 characters. `ReadHeaderTimeout`, `IdleTimeout`, `MaxHeaderBytes`, `DB_MAX_CONN_LIFETIME`; migration `0005_devices_outlet_idx`; `observability.go` renamed; magic durations named. Verified: unit tests, integration tests on `madkunyah_test` (119 passed, 0 skipped), live checks on a temporary database (two instances starting together, spoofed `X-Forwarded-For` gets 429, OTP logging on and off, startup refusals), golangci-lint clean. Earlier E2E suites not rerun. Not done, need design or a decision: M1 versioned authz cache, M2 subject-level access-token revocation, M3 acting-staff proof on POS, M4 POS refresh grace binding, L1 credentialed CORS, L3 OTP lockout and overwrite, L4 PIN-failure sync checks. Not quick: Redis pool options, append-only `audit_logs`, down migrations, doc comments, long functions, `any` usage. Follow-up: update FR-PIN-5 to match the stricter rule.
