@@ -78,13 +78,17 @@ func (s *Service) RequestOTP(ctx context.Context, in OTPRequest, meta RequestMet
 	return nil
 }
 
+// otpQuotaKeyTTL outlives the quota day in any timezone, so a key is never
+// dropped while its day is still running.
+const otpQuotaKeyTTL = 48 * time.Hour
+
 func (s *Service) checkRequestLimits(ctx context.Context, id domain.Identifier, ip, quotaDay string, now time.Time) error {
 	reason, wait, err := s.deps.Limiter.AllowOTPRequest(ctx, id.Value, ip, quotaDay, credis.OTPLimits{
 		IPLimit:    s.cfg.IPHourlyQuota,
 		IPWindow:   time.Hour,
 		Cooldown:   s.cfg.Cooldown,
 		DailyQuota: s.cfg.DailyQuota,
-		QuotaTTL:   48 * time.Hour,
+		QuotaTTL:   otpQuotaKeyTTL,
 	})
 	if err != nil {
 		return unavailable(err)

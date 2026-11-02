@@ -27,22 +27,38 @@ func canAssign(actor *domain.StaffAccess, outletID, role string) error {
 
 // canResetPIN enforces FR-PIN-5: staff.manage at an outlet where the target
 // holds a role. A global owner may reset any PIN, including one belonging to
-// a global role holder, who has no outlet role to qualify through.
+// a global role holder, who has no outlet role to qualify through. Staff may
+// reset their own. Otherwise the actor must also outrank the target at every
+// outlet they manage in common, so a manager cannot reset an owner's PIN.
 func canResetPIN(actor, target *domain.StaffAccess) error {
 	if actor.IsGlobalOwner() {
 		return nil
 	}
-	visible := false
-	for outletID := range target.Outlets {
-		if actor.Can(outletID, domain.PermStaffManage) {
-			return nil
-		}
+	visible, manages := false, false
+	for outletID, scope := range target.Outlets {
 		visible = visible || actor.Visible(outletID)
+		if !actor.Can(outletID, domain.PermStaffManage) {
+			continue
+		}
+		manages = true
+		if actor.StaffID == target.StaffID {
+			continue
+		}
+		for _, role := range scope.Roles {
+			if err := canAssign(actor, outletID, role); err != nil {
+				return err
+			}
+		}
 	}
-	if !visible {
+	switch {
+	case !visible:
 		return domain.ErrNotFound
+	case !manages:
+		return domain.ErrForbidden
+	case actor.StaffID != target.StaffID && len(target.Global.Roles) > 0:
+		return errEscalation
 	}
-	return domain.ErrForbidden
+	return nil
 }
 
 // canManage decides whether actor may deactivate target or end its sessions.

@@ -28,4 +28,4 @@ TEST_DATABASE_URL=... go test ./internal/authz   # permission-matrix test agains
 go test ./internal/httpx -run TestName   # single test
 ```
 
-Config is loaded from env vars (`.env` is read automatically via godotenv). Required: `DATABASE_URL`, `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY` (PEM-encoded ECDSA P-256), `OTP_PEPPER`. Everything else has defaults in `internal/config/config.go`. Startup fails fast if Postgres or Redis can't be pinged.
+Config is loaded from env vars (`.env` is read automatically via godotenv). Required: `APP_ENV`, `DATABASE_URL`, `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY` (PEM-encoded ECDSA P-256), `OTP_PEPPER` (at least 32 characters). Set-but-invalid values fail startup. Behind a proxy, set `TRUSTED_PROXIES` (CIDRs) or every client shares the proxy's IP. `OTP_LOG_CODES=true` logs plaintext codes for local development and is refused in production. Everything else has defaults in `internal/config/config.go`. Startup fails fast if Postgres or Redis can't be pinged.

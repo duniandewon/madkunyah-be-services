@@ -1,11 +1,13 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
@@ -61,22 +63,80 @@ func BearerToken(r *http.Request) string {
 	return strings.TrimSpace(h[7:])
 }
 
-// ClientIP resolves the caller address for rate limiting. X-Forwarded-For is
-// trusted only because this service is expected to sit behind a proxy that
-// sets it; exposed directly, the header is attacker-controlled.
+type clientIPKey struct{}
+
+// WithClientIP stores the resolved caller address on the context.
+func WithClientIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, clientIPKey{}, ip)
+}
+
+// ClientIP returns the caller address resolved by the ClientIP middleware. It
+// falls back to the socket peer and never reads forwarding headers itself.
 func ClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i > 0 {
-			return strings.TrimSpace(xff[:i])
+	if ip, ok := r.Context().Value(clientIPKey{}).(string); ok {
+		return ip
+	}
+	return remoteHost(r)
+}
+
+// ResolveClientIP finds the caller address. Forwarding headers are attacker
+// controlled unless the socket peer is a trusted proxy, so they are read only
+// in that case. X-Forwarded-For is walked from the right because each proxy
+// appends: the first untrusted hop is the last address a trusted proxy saw,
+// and anything further left is whatever the client sent.
+func ResolveClientIP(r *http.Request, trusted []netip.Prefix) string {
+	remote, ok := parseAddr(remoteHost(r))
+	if !ok {
+		return remoteHost(r)
+	}
+	if !isTrusted(remote, trusted) {
+		return remote.String()
+	}
+	forwarded := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
+	if strings.TrimSpace(forwarded) == "" {
+		if real, ok := parseAddr(r.Header.Get("X-Real-IP")); ok {
+			return real.String()
 		}
-		return strings.TrimSpace(xff)
+		return remote.String()
 	}
-	if rip := r.Header.Get("X-Real-IP"); rip != "" {
-		return rip
+	hops := strings.Split(forwarded, ",")
+	best := remote
+	for i := len(hops) - 1; i >= 0; i-- {
+		addr, ok := parseAddr(hops[i])
+		if !ok {
+			break
+		}
+		best = addr
+		if !isTrusted(addr, trusted) {
+			break
+		}
 	}
+	return best.String()
+}
+
+func remoteHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// parseAddr returns the canonical address, so one client maps to one rate
+// limit key however it is written.
+func parseAddr(s string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(s))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap().WithZone(""), true
+}
+
+func isTrusted(addr netip.Addr, trusted []netip.Prefix) bool {
+	for _, p := range trusted {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }

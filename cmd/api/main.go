@@ -43,9 +43,10 @@ func run() error {
 	defer stop()
 
 	db, err := postgres.Connect(ctx, postgres.Config{
-		DSN:         cfg.DB.DSN,
-		MaxConns:    cfg.DB.MaxConns,
-		MaxConnIdle: cfg.DB.MaxConnIdle,
+		DSN:             cfg.DB.DSN,
+		MaxConns:        cfg.DB.MaxConns,
+		MaxConnIdle:     cfg.DB.MaxConnIdle,
+		MaxConnLifetime: cfg.DB.MaxConnLifetime,
 	})
 	if err != nil {
 		return err
@@ -145,8 +146,8 @@ func newAuthService(cfg *config.Config, repo *auth.Repository, rdb *credis.Clien
 		return nil, nil, err
 	}
 	// The log notifier stands in until WhatsApp/SMTP are integrated. Codes are
-	// printed only in local development.
-	dispatcher := auth.NewDispatcher(notifier.NewLog(cfg.Env == "development"), rdb, cfg.OTP.DispatchRetryWindow)
+	// printed only on the explicit OTP_LOG_CODES opt-in.
+	dispatcher := auth.NewDispatcher(notifier.NewLog(cfg.OTP.LogCodes), rdb, cfg.OTP.DispatchRetryWindow)
 
 	svc := auth.NewService(auth.Config{
 		Pepper:              []byte(cfg.OTP.Pepper),

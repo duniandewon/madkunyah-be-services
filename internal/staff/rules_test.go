@@ -108,6 +108,11 @@ func TestCanResetPIN(t *testing.T) {
 		{"supervisor lacks staff.manage", supervisor, access("c4", nil, map[string][]string{"A": {domain.RoleCashier}}), domain.CodeForbidden},
 		{"manager resets global-only staff", manager, access("o", []string{domain.RoleOwner}, nil), domain.CodeNotFound},
 		{"global owner resets global-only staff", globalOwner, access("o2", []string{domain.RoleOwner}, nil), ""},
+		{"manager resets outlet owner", manager, access("o3", nil, map[string][]string{"A": {domain.RoleOwner}}), domain.CodeForbidden},
+		{"manager resets fellow manager", manager, access("m2", nil, map[string][]string{"A": {domain.RoleManager}}), domain.CodeForbidden},
+		{"manager resets global role holder at outlet", manager, access("o4", []string{domain.RoleOwner}, map[string][]string{"A": {domain.RoleCashier}}), domain.CodeForbidden},
+		{"manager resets own PIN", manager, manager, ""},
+		{"outlet owner resets manager", access("oo", nil, map[string][]string{"A": {domain.RoleOwner}}), access("m3", nil, map[string][]string{"A": {domain.RoleManager}}), ""},
 	}
 	for _, tt := range tests {
 		if got := code(canResetPIN(tt.actor, tt.target)); got != tt.want {

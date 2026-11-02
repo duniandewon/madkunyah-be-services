@@ -33,12 +33,23 @@ type Deps struct {
 	Catalog *catalog.Handler
 }
 
+const (
+	readHeaderTimeout = 5 * time.Second
+	idleTimeout       = 60 * time.Second
+	maxHeaderBytes    = 16 << 10
+	requestTimeout    = 25 * time.Second
+	readyCheckTimeout = 3 * time.Second
+)
+
 func New(d Deps) *http.Server {
 	return &http.Server{
-		Addr:         ":" + d.Config.HTTP.Port,
-		Handler:      Router(d),
-		ReadTimeout:  d.Config.HTTP.ReadTimeout,
-		WriteTimeout: d.Config.HTTP.WriteTimeout,
+		Addr:              ":" + d.Config.HTTP.Port,
+		Handler:           Router(d),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       d.Config.HTTP.ReadTimeout,
+		WriteTimeout:      d.Config.HTTP.WriteTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 }
 
@@ -46,10 +57,11 @@ func Router(d Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(mw.RequestID)
+	r.Use(mw.ClientIP(d.Config.HTTP.TrustedProxies))
 	r.Use(mw.Recover)
 	r.Use(mw.Logging)
 	r.Use(mw.CORS(d.Config.HTTP.CORSOrigins))
-	r.Use(mw.Timeout(25 * time.Second))
+	r.Use(mw.Timeout(requestTimeout))
 
 	r.Get("/health", healthHandler())
 	r.Get("/ready", readyHandler(d))
@@ -184,7 +196,7 @@ func healthHandler() http.HandlerFunc {
 
 func readyHandler(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
 		defer cancel()
 
 		checks := map[string]string{"database": "ok", "redis": "ok"}

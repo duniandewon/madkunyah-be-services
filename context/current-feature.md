@@ -1,20 +1,53 @@
-# Current Feature
+# Current Feature: Code Scanner Quick Wins
 
 <!-- Feature name and short description -->
+
+Small, self-contained hardening fixes from the code-scanner findings of 2026-11-02. IDs (H1, M5, ...) refer to that scan.
 
 ## Status
 
 <!-- Not started | In Progress | Completed -->
 
-Completed
+In Progress
 
 ## Goals
 
 <!-- Goals and requirements -->
 
+**Security**
+
+- **H1:** `httpx.ClientIP` (`internal/httpx/request.go`) honours `X-Forwarded-For` and `X-Real-IP` only when `RemoteAddr` is in a new `TRUSTED_PROXIES` CIDR list, taking the right-most untrusted `X-Forwarded-For` hop. Otherwise it uses `RemoteAddr`.
+- **H2:** Plaintext OTP codes are logged only with an explicit `OTP_LOG_CODES=true`, never because of `APP_ENV`. Startup fails if `APP_ENV` is unset, if `OTP_LOG_CODES=true` in production, or if `CORS_ORIGINS=*` in production.
+- **L2:** `canResetPIN` (`internal/staff/rules.go`) applies the role hierarchy to the target's roles, so a manager can't reset an owner's PIN.
+
+**Reliability**
+
+- **M5:** Staff routes reject a malformed `outletID` with 404 instead of 500 (`internal/staff/handler.go`).
+- **M6:** `Migrate` holds a `pg_advisory_lock` throughout and reads applied versions after acquiring it (`platform/postgres/migrate.go`).
+- **L5:** The notification goroutine in `internal/auth/dispatch.go` recovers from panics and logs them.
+- **L6:** Set-but-invalid env values fail startup instead of using defaults. Values cast to `uint32`, `uint8` or `int32` are range checked, and `OTP_PEPPER` and `OTP_LENGTH` are bounded (`internal/config/config.go`).
+- **L7:** The HTTP server sets `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes` (`internal/server/server.go`).
+
+**Housekeeping**
+
+- **L8 (part):** Set `MaxConnLifetime` on the Postgres pool, and add an index on `devices.outlet_id` in a new migration.
+- **L9 (part):** Rename `internal/middleware/observibility.go` to `observability.go`, and name the magic-number durations in `internal/server/server.go` and `internal/auth/otp.go`.
+
 ## Notes
 
 <!-- Any extra notes -->
+
+- The scan only read the code and didn't consult `context/project-overview.md` or `context/spec/`. Confirm each finding against the code and spec before fixing it, especially L2 against FR-AZ-6.
+- **Deploy changes:** `APP_ENV` becomes required. Any deployment behind a proxy must set `TRUSTED_PROXIES`, or all clients share the proxy's IP and its rate limits. Add the new variables to `.env` and any env example.
+- **Left out because they need design work or a decision:**
+  - M1: versioned authz cache
+  - M2: subject-level access-token revocation and Redis-down behaviour
+  - M3: acting-staff proof on POS
+  - M4: POS refresh grace binding
+  - L1: credentialed CORS, which depends on frontend domains
+  - L3: OTP lockout and overwrite
+  - L4: PIN-failure sync checks
+- **Left out as not quick:** the rest of L8 (Redis pool options, append-only `audit_logs`, down migrations) and the rest of L9 (doc comments, long functions, `any` usage).
 
 ## History
 

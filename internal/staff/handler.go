@@ -60,7 +60,11 @@ func (h *Handler) ResetPIN(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	members, err := h.svc.List(r.Context(), chi.URLParam(r, "outletID"))
+	outletID, ok := outletIDParam(w, r)
+	if !ok {
+		return
+	}
+	members, err := h.svc.List(r.Context(), outletID)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -69,12 +73,16 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	outletID, ok := outletIDParam(w, r)
+	if !ok {
+		return
+	}
 	var body createBody
 	if err := httpx.DecodeValid(w, r, &body); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
-	m, err := h.svc.Create(r.Context(), middleware.AccessFrom(r.Context()), chi.URLParam(r, "outletID"),
+	m, err := h.svc.Create(r.Context(), middleware.AccessFrom(r.Context()), outletID,
 		CreateInput(body))
 	if err != nil {
 		httpx.Error(w, r, err)
@@ -110,11 +118,15 @@ func (h *Handler) RevokeSessions(w http.ResponseWriter, r *http.Request) {
 type roleChangeFunc func(ctx context.Context, actor *domain.StaffAccess, staffID string, g grant) error
 
 func (h *Handler) roleChange(w http.ResponseWriter, r *http.Request, fn roleChangeFunc) {
+	outletID, ok := outletIDParam(w, r)
+	if !ok {
+		return
+	}
 	staffID, role, ok := staffAndRole(w, r)
 	if !ok {
 		return
 	}
-	g := grant{OutletID: chi.URLParam(r, "outletID"), Role: role}
+	g := grant{OutletID: outletID, Role: role}
 	if err := fn(r.Context(), middleware.AccessFrom(r.Context()), staffID, g); err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -153,6 +165,17 @@ func (h *Handler) staffAction(w http.ResponseWriter, r *http.Request, fn staffAc
 // staffIDParam rejects a malformed ID as not_found, the same as an unknown one.
 func staffIDParam(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := chi.URLParam(r, "staffID")
+	if _, err := uuid.Parse(id); err != nil {
+		httpx.Error(w, r, domain.ErrNotFound)
+		return "", false
+	}
+	return id, true
+}
+
+// outletIDParam rejects a malformed ID as not_found. Access checks let a global
+// role through for any string, so it would otherwise reach Postgres as a uuid.
+func outletIDParam(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := chi.URLParam(r, "outletID")
 	if _, err := uuid.Parse(id); err != nil {
 		httpx.Error(w, r, domain.ErrNotFound)
 		return "", false

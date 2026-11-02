@@ -49,6 +49,13 @@ func (d *Dispatcher) Dispatch(job *DispatchJob) {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
+		// A panic here is outside the HTTP Recover middleware and would take
+		// the whole process down.
+		defer func() {
+			if p := recover(); p != nil {
+				slog.Error("otp dispatch panicked", "panic", p, "to", job.To.Masked())
+			}
+		}()
 		d.run(job)
 	}()
 }

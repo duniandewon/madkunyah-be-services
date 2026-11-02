@@ -14,9 +14,10 @@ type DB struct {
 }
 
 type Config struct {
-	DSN         string
-	MaxConns    int32
-	MaxConnIdle time.Duration
+	DSN             string
+	MaxConns        int32
+	MaxConnIdle     time.Duration
+	MaxConnLifetime time.Duration
 }
 
 func Connect(ctx context.Context, cfg Config) (*DB, error) {
@@ -26,6 +27,7 @@ func Connect(ctx context.Context, cfg Config) (*DB, error) {
 	}
 	poolCfg.MaxConns = cfg.MaxConns
 	poolCfg.MaxConnIdleTime = cfg.MaxConnIdle
+	poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
