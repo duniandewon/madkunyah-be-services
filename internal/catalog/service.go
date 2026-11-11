@@ -34,7 +34,7 @@ type repository interface {
 	OutletCatalog(ctx context.Context, outletID string, includeArchived bool) ([]outletRow, error)
 	UpdateChannelSettings(ctx context.Context, actorID string, k settingsKey,
 		fn func(*ChannelSettings) error) (*ChannelResult, error)
-	ResetChannelSettings(ctx context.Context, actorID string, k settingsKey, check func(*ChannelSettings) error) error
+	ResetChannelSettings(ctx context.Context, actorID string, k settingsKey, check func(*ChannelSettings) error) (bool, error)
 
 	SetSoldOut(ctx context.Context, w *SoldOutWrite, now time.Time) (*SoldOutResult, error)
 	ListSoldOut(ctx context.Context, outletID string, at time.Time) ([]SoldOutEntry, error)

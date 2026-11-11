@@ -58,9 +58,9 @@ func Router(d Deps) http.Handler {
 
 	r.Use(mw.RequestID)
 	r.Use(mw.ClientIP(d.Config.HTTP.TrustedProxies))
-	r.Use(mw.Recover)
 	r.Use(mw.Logging)
 	r.Use(mw.CORS(d.Config.HTTP.CORSOrigins))
+	r.Use(mw.Recover)
 	r.Use(mw.Timeout(requestTimeout))
 
 	r.Get("/health", healthHandler())

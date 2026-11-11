@@ -250,7 +250,7 @@ func (s *Service) PublicOutlets(ctx context.Context) ([]PublicOutlet, error) {
 // Menu returns the outlet's web menu evaluated now. The storefront comes
 // from the cache when it can; the time-dependent flags never do.
 func (s *Service) Menu(ctx context.Context, outletID string) (*Menu, error) {
-	b, err := s.cache.fetch(ctx, docMenu, outletID, func() ([]byte, error) {
+	b, err := s.cache.fetch(ctx, docMenu, outletID, func(ctx context.Context) ([]byte, error) {
 		sf, err := s.repo.Storefront(ctx, outletID, ChannelWeb)
 		if err != nil {
 			return nil, err
@@ -269,7 +269,7 @@ func (s *Service) Menu(ctx context.Context, outletID string) (*Menu, error) {
 
 // Bundle returns the outlet's POS bundle as its JSON body and version.
 func (s *Service) Bundle(ctx context.Context, outletID string) ([]byte, string, error) {
-	b, err := s.cache.fetch(ctx, docBundle, outletID, func() ([]byte, error) {
+	b, err := s.cache.fetch(ctx, docBundle, outletID, func(ctx context.Context) ([]byte, error) {
 		sf, err := s.repo.Storefront(ctx, outletID, ChannelPOS)
 		if err != nil {
 			return nil, err

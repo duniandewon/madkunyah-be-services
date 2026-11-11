@@ -1,22 +1,28 @@
-# Current Feature
+# Current Feature: Code scan 2026-11-11 fixes
 
-<!-- Feature name and short description -->
+Fixes from the 2026-11-11 code-scanner run (0 critical, 0 high, 3 medium, 6 low groups).
 
 ## Status
 
-<!-- Not started | In Progress | Completed -->
-
-Completed
+In Progress
 
 ## Goals
 
-<!-- Goals and requirements -->
+- M-A: reject `APP_ENV` values outside development|test|staging|production
+- M-B: public menu survives a Redis outage: in-process fallback rate limiter, singleflight on cache misses
+- M-C: invalidate the catalog cache only on real changes; per-outlet generation for outlet-scoped writes
+- L-A: invalidate the cache when a commit fails ambiguously (context cancelled / deadline)
+- L-B: duration env vars must be > 0
+- L-C: rate-limit IPv6 clients by /64
+- L-F: sanitise `X-Request-ID`; `Recover` re-panics `http.ErrAbortHandler` and sits inside Logging and CORS; shutdown timeout >= request timeout; no Go type names in decode errors; 413 for oversized bodies
 
 ## Notes
 
-<!-- Any extra notes -->
+- Deferred: L-D `/ready` caching, L-E in-process menu body cache, unknown-field detection rewrite.
+- Plan: `~/.claude/plans/use-code-scannet-agent-tranquil-haven.md`
 
 ## History
+
 
 
 <!-- Keep this updated from earliest to latest -->

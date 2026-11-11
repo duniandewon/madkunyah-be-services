@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -23,22 +24,27 @@ import (
 
 // memStore is the Redis cache in memory, with switches for an outage.
 type memStore struct {
-	mu       sync.Mutex
-	gen      int64
-	docs     map[string][]byte
-	down     bool
-	bumpFail bool
+	mu        sync.Mutex
+	gen       int64
+	outletGen map[string]int64
+	docs      map[string][]byte
+	down      bool
+	bumpFail  bool
 }
 
 var errRedisDown = errors.New("redis down")
 
-func (m *memStore) CatalogGeneration(context.Context) (int64, error) {
+func newMemStore() *memStore {
+	return &memStore{outletGen: map[string]int64{}, docs: map[string][]byte{}}
+}
+
+func (m *memStore) CatalogGenerations(_ context.Context, outletID string) (global, outlet int64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.down {
-		return 0, errRedisDown
+		return 0, 0, errRedisDown
 	}
-	return m.gen, nil
+	return m.gen, m.outletGen[outletID], nil
 }
 
 func (m *memStore) BumpCatalogGeneration(context.Context) error {
@@ -49,6 +55,23 @@ func (m *memStore) BumpCatalogGeneration(context.Context) error {
 	}
 	m.gen++
 	return nil
+}
+
+func (m *memStore) BumpOutletCatalogGeneration(_ context.Context, outletID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.down || m.bumpFail {
+		return errRedisDown
+	}
+	m.outletGen[outletID]++
+	return nil
+}
+
+// bumps returns the catalog-wide and the outlet's generation.
+func (m *memStore) bumps(outletID string) (global, outlet int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gen, m.outletGen[outletID]
 }
 
 func (m *memStore) GetCatalogDoc(_ context.Context, key string) ([]byte, error) {
@@ -84,7 +107,7 @@ type oenv struct {
 func newOutletEnv(t *testing.T) *oenv {
 	t.Helper()
 	e := newEnv(t)
-	store := &memStore{docs: map[string][]byte{}}
+	store := newMemStore()
 	e.svc = NewService(NewRepository(testDB), Config{PriceMax: 100_000_000, CacheTTL: time.Minute}, store)
 	e.owner.StaffID = e.staffRow("Owner")
 	// The seeded owner role carries every outlet permission globally.
@@ -707,10 +730,10 @@ func TestBundleVersionStable(t *testing.T) {
 	e.toggle(a, SoldOutItem{ProductID: &p.ID}, true, ScopeToday)
 	_, v1 := e.bundle(a)
 	e.svc.now = func() time.Time { return time.Now().Add(30 * time.Hour) }
-	gen := e.store.gen
+	_, gen := e.store.bumps(b)
 	e.toggle(b, SoldOutItem{ProductID: &p.ID}, true, ScopeIndefinite)
-	if e.store.gen != gen+1 {
-		t.Fatal("toggle did not bump the generation")
+	if _, after := e.store.bumps(b); after != gen+1 {
+		t.Fatal("toggle did not bump the outlet generation")
 	}
 	sf, v2 := e.bundle(a)
 	if v1 != v2 {
@@ -725,6 +748,58 @@ func TestBundleVersionStable(t *testing.T) {
 	}
 	if _, v3 := e.bundle(a); v3 == v1 {
 		t.Fatal("price change kept the version")
+	}
+}
+
+// Outlet-scoped writes bump only that outlet's generation, and only when
+// they change something; the other outlet keeps its cached menu.
+func TestOutletWritesInvalidateOnlyOnChange(t *testing.T) {
+	e := newOutletEnv(t)
+	p := e.product(e.category("Scope").ID, "Kopi", 20000)
+	a, b := e.outletID(), e.outletID()
+	global, _ := e.store.bumps(a)
+	want := func(step string, wantA int64) {
+		t.Helper()
+		g, ga := e.store.bumps(a)
+		_, gb := e.store.bumps(b)
+		if g != global || ga != wantA || gb != 0 {
+			t.Fatalf("%s: global %d->%d, outlet a %d (want %d), outlet b %d (want 0)", step, global, g, ga, wantA, gb)
+		}
+	}
+	put := func() {
+		t.Helper()
+		if _, err := e.svc.SetChannelSettings(e.ctx, e.owner, a, p.ID, ChannelWeb,
+			&ChannelSettingsInput{Price: set(int64(25000))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reset := func() {
+		t.Helper()
+		if err := e.svc.ResetChannelSettings(e.ctx, e.owner, a, p.ID, ChannelWeb); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e.menuProduct(b, p.CategoryID, p.ID)
+	put()
+	want("price override", 1)
+	put()
+	want("repeated override", 1)
+	reset()
+	want("reset", 2)
+	reset()
+	want("repeated reset", 2)
+	e.toggle(a, SoldOutItem{ProductID: &p.ID}, true, ScopeIndefinite)
+	want("sold out", 3)
+	e.toggle(a, SoldOutItem{ProductID: &p.ID}, true, ScopeIndefinite)
+	want("repeated sold out", 3)
+
+	key := fmt.Sprintf("catalog:%s:%d.0:%s", docMenu, global, b)
+	e.store.mu.Lock()
+	_, cached := e.store.docs[key]
+	e.store.mu.Unlock()
+	if !cached {
+		t.Fatal("outlet b's cached menu was dropped by writes to outlet a")
 	}
 }
 

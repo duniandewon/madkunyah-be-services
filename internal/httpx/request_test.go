@@ -20,7 +20,7 @@ func TestDecodeRejectsNonIntegerPrices(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
 		err := Decode(httptest.NewRecorder(), req, &dst)
 		de := domain.AsError(err)
-		if de == nil || de.Code != domain.CodeInvalidInput || de.Fields["base_price"] == "" {
+		if de == nil || de.Code != domain.CodeInvalidInput || de.Fields["base_price"] != "expected an integer" {
 			t.Errorf("%s: err = %v", body, err)
 		}
 	}
@@ -32,7 +32,7 @@ func TestDecodeBodyTooLarge(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req.Body = http.MaxBytesReader(rec, req.Body, 50)
 	err := Decode(rec, req, &dst)
-	if de := domain.AsError(err); de == nil || de.Message != "request body is too large" {
+	if de := domain.AsError(err); de == nil || de.Code != domain.CodePayloadTooLarge {
 		t.Errorf("err = %v", err)
 	}
 }

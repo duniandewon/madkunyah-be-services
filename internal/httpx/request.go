@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strings"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
@@ -32,10 +33,10 @@ func Decode(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 			return domain.NewError(domain.CodeInvalidInput, "request body is not valid JSON")
 		case errors.As(err, &typeErr):
 			return domain.ValidationError(map[string]string{
-				typeErr.Field: "expected " + typeErr.Type.String(),
+				typeErr.Field: "expected " + jsonTypeName(typeErr.Type),
 			})
 		case errors.As(err, &sizeErr):
-			return domain.NewError(domain.CodeInvalidInput, "request body is too large")
+			return domain.NewError(domain.CodePayloadTooLarge, "request body is too large")
 		case errors.Is(err, io.EOF):
 			return domain.NewError(domain.CodeInvalidInput, "request body is empty")
 		case strings.Contains(err.Error(), "unknown field"):
@@ -51,6 +52,31 @@ func Decode(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 		return domain.NewError(domain.CodeInvalidInput, "request body must contain a single JSON object")
 	}
 	return nil
+}
+
+// jsonTypeName describes the JSON value a Go type accepts, so clients see
+// "an integer" rather than internal type names such as catalog.Nullable[int64].
+func jsonTypeName(t reflect.Type) string {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "an integer"
+	case reflect.Float32, reflect.Float64:
+		return "a number"
+	case reflect.String:
+		return "a string"
+	case reflect.Bool:
+		return "true or false"
+	case reflect.Slice, reflect.Array:
+		return "an array"
+	case reflect.Map, reflect.Struct:
+		return "an object"
+	default:
+		return "a different type"
+	}
 }
 
 // BearerToken returns the token from an "Authorization: Bearer" header, or ""

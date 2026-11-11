@@ -41,6 +41,8 @@ func statusFor(code domain.ErrorCode) int {
 	switch code {
 	case domain.CodeInvalidInput, domain.CodeInvalidIdentifier, domain.CodeWeakPIN:
 		return http.StatusBadRequest
+	case domain.CodePayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
 	case domain.CodeUnauthorized, domain.CodeOTPInvalid, domain.CodeTokenExpired,
 		domain.CodeTokenInvalid, domain.CodeSessionRevoked, domain.CodeDeviceRevoked:
 		return http.StatusUnauthorized

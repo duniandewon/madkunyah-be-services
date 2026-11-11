@@ -12,6 +12,7 @@ type ErrorCode string
 
 const (
 	CodeInvalidInput      ErrorCode = "invalid_input"
+	CodePayloadTooLarge   ErrorCode = "payload_too_large"
 	CodeUnauthorized      ErrorCode = "unauthorized"
 	CodeForbidden         ErrorCode = "forbidden"
 	CodeNotFound          ErrorCode = "not_found"

@@ -50,6 +50,8 @@ type ChannelResult struct {
 	OutletID  string  `json:"outlet_id"`
 	Channel   Channel `json:"channel"`
 	ChannelView
+	// changed reports whether the write changed the stored row.
+	changed bool
 }
 
 // ChannelSettingsInput sets the fields present in the body; null returns a
@@ -140,7 +142,7 @@ func (s *Service) SetChannelSettings(ctx context.Context, actor *domain.StaffAcc
 	res, err := s.repo.UpdateChannelSettings(ctx, actor.StaffID, k, func(cs *ChannelSettings) error {
 		return s.applySettings(cs, in)
 	})
-	s.cache.afterWrite(ctx, err)
+	s.cache.afterOutletWrite(ctx, outletID, err == nil && res.changed, err)
 	return res, err
 }
 
@@ -177,7 +179,7 @@ func (s *Service) ResetChannelSettings(ctx context.Context, actor *domain.StaffA
 		return errAvailabilityForbidden
 	}
 	k := settingsKey{outletID: outletID, productID: productID, channel: ch}
-	err := s.repo.ResetChannelSettings(ctx, actor.StaffID, k, func(cs *ChannelSettings) error {
+	changed, err := s.repo.ResetChannelSettings(ctx, actor.StaffID, k, func(cs *ChannelSettings) error {
 		if cs.Price != nil && !canPrice {
 			return errPriceForbidden
 		}
@@ -186,6 +188,6 @@ func (s *Service) ResetChannelSettings(ctx context.Context, actor *domain.StaffA
 		}
 		return nil
 	})
-	s.cache.afterWrite(ctx, err)
+	s.cache.afterOutletWrite(ctx, outletID, changed, err)
 	return err
 }

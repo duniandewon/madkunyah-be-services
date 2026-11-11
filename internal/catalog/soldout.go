@@ -191,9 +191,7 @@ func (s *Service) SetSoldOut(ctx context.Context, w *SoldOutWrite) (*SoldOutResu
 		w.Scope = ScopeToday
 	}
 	res, err := s.repo.SetSoldOut(ctx, w, now)
-	if err == nil && res.Applied {
-		s.cache.invalidate(ctx)
-	}
+	s.cache.afterOutletWrite(ctx, w.OutletID, err == nil && res.Applied, err)
 	return res, err
 }
 

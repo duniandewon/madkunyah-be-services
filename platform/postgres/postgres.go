@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -66,7 +68,19 @@ func (db *DB) InTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
+		// A PgError means the server answered and rolled back. Anything else
+		// (a cancelled context, a dropped connection) leaves the outcome
+		// unknown: the commit may have landed.
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) {
+			return fmt.Errorf("commit transaction: %w: %w", ErrCommitUncertain, err)
+		}
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
 }
+
+// ErrCommitUncertain marks an InTx error where the commit was sent but its
+// outcome is unknown. Callers that react to a successful write, such as
+// cache invalidation, should treat it as possibly applied.
+var ErrCommitUncertain = errors.New("commit outcome unknown")

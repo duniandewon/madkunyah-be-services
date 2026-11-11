@@ -174,6 +174,7 @@ func (r *Repository) UpdateChannelSettings(ctx context.Context, actorID string, 
 			res.ChannelView = channelView(&p.product, p.catActive, k.channel, cur)
 			return nil
 		}
+		res.changed = true
 		next.UpdatedBy = actorID
 		if err := tx.QueryRow(ctx, upsertSettings, k.productID, k.outletID, string(k.channel), next.Price,
 			next.IsVisible, next.AvailableFrom, next.AvailableTo, actorID).Scan(&next.UpdatedAt); err != nil {
@@ -191,10 +192,11 @@ func (r *Repository) UpdateChannelSettings(ctx context.Context, actorID string, 
 }
 
 // ResetChannelSettings deletes the row after check approves it. Resetting
-// a missing or all-null row changes nothing and audits nothing.
+// a missing or all-null row changes nothing and audits nothing; changed
+// reports whether any field went back to inheriting.
 func (r *Repository) ResetChannelSettings(ctx context.Context, actorID string, k settingsKey,
-	check func(*ChannelSettings) error) error {
-	return r.db.InTx(ctx, func(tx pgx.Tx) error {
+	check func(*ChannelSettings) error) (changed bool, err error) {
+	err = r.db.InTx(ctx, func(tx pgx.Tx) error {
 		p, cur, err := lockedSettings(ctx, tx, k)
 		if err != nil || cur == nil {
 			return err
@@ -209,6 +211,7 @@ func (r *Repository) ResetChannelSettings(ctx context.Context, actorID string, k
 		if len(a) == 0 {
 			return nil
 		}
+		changed = true
 		ch := settingsChange(k, actionOutletProductReset, b, a)
 		if cur.Price != nil {
 			d := p.product.BasePrice - *cur.Price
@@ -216,6 +219,7 @@ func (r *Repository) ResetChannelSettings(ctx context.Context, actorID string, k
 		}
 		return writeAudit(ctx, tx, actorID, ch)
 	})
+	return changed, err
 }
 
 // settingsChange audits a settings write against the product, scoped to the

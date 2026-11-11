@@ -16,17 +16,43 @@ type ctxKey string
 
 const requestIDKey ctxKey = "request_id"
 
+// maxRequestIDLength bounds a client-supplied X-Request-ID; a UUID is 36.
+const maxRequestIDLength = 64
+
 // RequestID assigns each request an ID and echoes it back, so a customer
-// reporting an error can be traced to exact log lines.
+// reporting an error can be traced to exact log lines. A client-supplied ID
+// is kept only when it is short and plain; otherwise a new one is issued, so
+// arbitrary header bytes never reach the logs or the response.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
-		if id == "" {
+		if !validRequestID(id) {
 			id = uuid.NewString()
 		}
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey, id)))
 	})
+}
+
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLength {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if !requestIDByte(id[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func requestIDByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	default:
+		return c == '-' || c == '_' || c == '.'
+	}
 }
 
 func RequestIDFromContext(ctx context.Context) string {
@@ -80,11 +106,17 @@ func Logging(next http.Handler) http.Handler {
 }
 
 // Recover turns a panic into a 500 rather than dropping the connection, and
-// keeps the rest of the server alive.
+// keeps the rest of the server alive. Mount it inside Logging and CORS, so a
+// panicking request is still logged and its 500 still carries CORS headers.
+// http.ErrAbortHandler is re-raised: it is net/http's deliberate way to abort
+// a response, not a bug.
 func Recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler { //nolint:errorlint // panic values are compared, not wrapped
+					panic(rec)
+				}
 				slog.ErrorContext(r.Context(), "panic recovered",
 					"request_id", RequestIDFromContext(r.Context()),
 					"panic", rec,

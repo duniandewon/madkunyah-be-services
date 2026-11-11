@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -119,6 +120,10 @@ type PIN struct {
 	Argon2Threads   uint8
 }
 
+// envs lists the accepted APP_ENV values. Anything else is refused, so a
+// typo such as "prod" cannot quietly skip the production guards.
+var envs = []string{"development", "test", "staging", "production"}
+
 // minPepperLength matches the HMAC-SHA256 output size in bytes.
 const minPepperLength = 32
 
@@ -142,7 +147,7 @@ func Load() (*Config, error) {
 			Port:            def("HTTP_PORT", "8080"),
 			ReadTimeout:     l.dur("HTTP_READ_TIMEOUT", 10*time.Second),
 			WriteTimeout:    l.dur("HTTP_WRITE_TIMEOUT", 30*time.Second),
-			ShutdownTimeout: l.dur("HTTP_SHUTDOWN_TIMEOUT", 20*time.Second),
+			ShutdownTimeout: l.dur("HTTP_SHUTDOWN_TIMEOUT", 30*time.Second),
 			CORSOrigins:     splitList(def("CORS_ORIGINS", "*")),
 			TrustedProxies:  l.prefixes("TRUSTED_PROXIES"),
 		},
@@ -212,6 +217,9 @@ func Load() (*Config, error) {
 // the variable only, so a secret never reaches the startup log.
 func (c *Config) unsafeSettings() []string {
 	var problems []string
+	if c.Env != "" && !slices.Contains(envs, c.Env) {
+		problems = append(problems, "APP_ENV must be one of "+strings.Join(envs, ", "))
+	}
 	if len(c.OTP.Pepper) < minPepperLength {
 		problems = append(problems, fmt.Sprintf("OTP_PEPPER must be at least %d characters", minPepperLength))
 	}
@@ -266,6 +274,8 @@ func (l *loader) integer(key string, fallback, minVal, maxVal int) int {
 	return v
 }
 
+// dur reads a positive duration. Zero would mean no timeout or no expiry
+// (and Redis rejects a zero PX), which no setting here wants.
 func (l *loader) dur(key string, fallback time.Duration) time.Duration {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -276,8 +286,8 @@ func (l *loader) dur(key string, fallback time.Duration) time.Duration {
 		l.fail(key, "must be a duration such as 30s or 5m")
 		return fallback
 	}
-	if v < 0 {
-		l.fail(key, "must not be negative")
+	if v <= 0 {
+		l.fail(key, "must be greater than zero")
 		return fallback
 	}
 	return v
