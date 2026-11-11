@@ -1,29 +1,22 @@
-# Current Feature: Code scan 2026-11-11 fixes
+# Current Feature
 
-Fixes from the 2026-11-11 code-scanner run (0 critical, 0 high, 3 medium, 6 low groups).
+<!-- Feature name and short description -->
 
 ## Status
 
-In Progress
+<!-- Not started | In Progress | Completed -->
+
+Completed
 
 ## Goals
 
-- M-A: reject `APP_ENV` values outside development|test|staging|production
-- M-B: public menu survives a Redis outage: in-process fallback rate limiter, singleflight on cache misses
-- M-C: invalidate the catalog cache only on real changes; per-outlet generation for outlet-scoped writes
-- L-A: invalidate the cache when a commit fails ambiguously (context cancelled / deadline)
-- L-B: duration env vars must be > 0
-- L-C: rate-limit IPv6 clients by /64
-- L-F: sanitise `X-Request-ID`; `Recover` re-panics `http.ErrAbortHandler` and sits inside Logging and CORS; shutdown timeout >= request timeout; no Go type names in decode errors; 413 for oversized bodies
+<!-- Goals and requirements -->
 
 ## Notes
 
-- Deferred: L-D `/ready` caching, L-E in-process menu body cache, unknown-field detection rewrite.
-- Plan: `~/.claude/plans/use-code-scannet-agent-tranquil-haven.md`
+<!-- Any extra notes -->
 
 ## History
-
-
 
 <!-- Keep this updated from earliest to latest -->
 
@@ -37,3 +30,4 @@ In Progress
 
 - **2026-11-01** — Outlet catalog (`feature/outlet-catalog`): migration `0004_outlet_catalog` (`product_channel_settings` keyed by product/outlet/channel with null = inherit; `outlet_sold_out` for exactly one of product/variant/modifier, rows kept when cleared; `devices.catalog_version` → nullable text hash, `catalog_fetched_at`). One resolver (`resolveChannel`, FR-OUT-2) serves Quote, menu, bundle and the dashboard view. Dashboard: `GET /v1/outlets/{id}/catalog` (both channels, override + resolved, `include_archived`), `PUT`/`DELETE …/products/{pid}/channels/{web|pos}` (PUT sets fields present, absent fields kept; price needs global `catalog.manage`, visibility/window need `product.availability.manage` at the outlet; any forbidden field → 403 and nothing written; DELETE of a priced row needs `catalog.manage`), `GET`/`PUT …/sold-out` (`product.sold_out.toggle`). Sold out: `today` = next business-day cutoff after the tap in outlet tz, `indefinite` = null; expiry evaluated on read; repeats and older POS `changed_at` → `applied: false`, future times clamped; unknown/archived target → 404. `PUT /v1/pos/sold-out` is the first route behind `RequireActingStaff`, permission checked server side. Quote applies overrides and sold-out at `At` (new kinds `product_sold_out`, `variant_sold_out`, `modifier_sold_out`), still 5 queries, ~1.5 ms p95 for 20 lines. Public `GET /v1/outlets` and `GET /v1/outlets/{id}/menu` (web-visible only, per-request `orderable`/`sold_out`/`in_window`, ETag/304, `Cache-Control: no-cache`, gzip, per-IP limit `CATALOG_PUBLIC_RATE_LIMIT` → 429 `rate_limited`). `GET /v1/pos/catalog`: raw rules, content-hash version, ETag/304, device version recorded on every fetch. Redis cache `catalog:gen` + `catalog:{menu,bundle}:{gen}:{outlet}` (`CATALOG_CACHE_TTL`), bumped after every catalog write including Catalog Core; cache and limiter calls time out at 150 ms and fall back to Postgres / fail open. Audit rows with `outlet_id` (`outlet_product.updated/reset` with `value_delta` and `channel`, `sold_out.set/cleared` with device and client `changed_at` on POS), none for no-ops. Verified: unit tests (resolution matrix, cutoff, sold-out decisions, orderable, version, rate limit, outlet role), integration tests AC-1..AC-22 on `madkunyah_test` with an in-memory cache store, E2E 93/93 on real Postgres + Redis, Redis-down check (menu 0.31 s), golangci-lint clean. Deferred: Prometheus metrics, OpenAPI, testcontainers-go, AC-23 (manual, POS hardware). Follow-up: the auth token-denylist check has no Redis timeout, so POS routes take ~1.9 s while Redis is down.
 - **2026-11-02** — Code scanner quick wins (`feature/code-scanner-quick-wins`): hardening fixes from the 2026-11-02 scan. `TRUSTED_PROXIES` (CIDRs): forwarding headers honoured only from those peers, right-most untrusted `X-Forwarded-For` hop, resolved once by the `ClientIP` middleware; `httpx.ClientIP` never reads headers. `APP_ENV` required; `OTP_LOG_CODES` opt-in for plaintext codes; production refuses it and wildcard CORS. PIN reset applies the role hierarchy on top of FR-PIN-5 (managers can't reset an owner, fellow manager or global role holder; self-reset allowed). Malformed `outletID` on staff routes → 404. `Migrate` holds an advisory lock on one connection. OTP dispatch goroutine recovers from panics. Set-but-invalid env values fail startup, with range checks and `OTP_PEPPER` at least 32 characters. `ReadHeaderTimeout`, `IdleTimeout`, `MaxHeaderBytes`, `DB_MAX_CONN_LIFETIME`; migration `0005_devices_outlet_idx`; `observability.go` renamed; magic durations named. Verified: unit tests, integration tests on `madkunyah_test` (119 passed, 0 skipped), live checks on a temporary database (two instances starting together, spoofed `X-Forwarded-For` gets 429, OTP logging on and off, startup refusals), golangci-lint clean. Earlier E2E suites not rerun. Not done, need design or a decision: M1 versioned authz cache, M2 subject-level access-token revocation, M3 acting-staff proof on POS, M4 POS refresh grace binding, L1 credentialed CORS, L3 OTP lockout and overwrite, L4 PIN-failure sync checks. Not quick: Redis pool options, append-only `audit_logs`, down migrations, doc comments, long functions, `any` usage. Follow-up: update FR-PIN-5 to match the stricter rule.
+- **2026-11-11** — Code scan fixes (`feature/code-scan-2026-11-11`): fixes from the 2026-11-11 code-scanner run (0 critical, 0 high, 3 medium, 6 low groups). `APP_ENV` must be `development`, `test`, `staging` or `production`. Every duration setting must be > 0 (Redis rejects a zero `PX`, so a zero `REFRESH_GRACE` or `OTP_COOLDOWN` would fail at runtime). `HTTP_SHUTDOWN_TIMEOUT` default 30s, above the 25s request timeout. Public rate limit falls back to an in-process fixed-window limiter (same budget, per instance, capped at 50k keys plus one overflow bucket) when Redis errors, instead of failing open; IPv6 clients counted per /64. Catalog cache: `singleflight` shares concurrent builds (miss and bypass), detached from the caller's context with a 10s bound; per-outlet generation `catalog:gen:{outletID}` read with the global one in one `MGET`, keys `catalog:{kind}:{gen}.{outletGen}:{outlet}`; channel settings and sold-out bump only their outlet and only when something changed. `postgres.InTx` wraps non-`PgError` commit failures in `ErrCommitUncertain`, and the cache invalidates on it. `X-Request-ID` kept only when ≤64 chars of `[A-Za-z0-9._-]`. `Recover` mounted inside `Logging` and `CORS` and re-raises `http.ErrAbortHandler`. Oversized bodies → 413 `payload_too_large` (new code); decode type errors say "expected an integer" etc. Verified: unit tests (config, request ID, Recover, CORS on panic, fallback limiter, /64 key, singleflight, cancel isolation, uncertain-commit invalidation, nil store), integration tests on `madkunyah_test` (129 passed, 0 skipped) including a new outlet-scoped invalidation test, race detector on the new concurrent code, live checks (`APP_ENV=prod` refused; with Redis stopped the menu returns 429 past the limit; request ID sanitised), golangci-lint clean. Earlier E2E suites not rerun; clients relying on 400 for oversized bodies or the old type-error text need updating. Deferred: L-D `/ready` caching, L-E in-process menu body cache, unknown-field detection rewrite. Still open: Redis-down menu latency ~0.3s (two 150ms timeouts per request).
