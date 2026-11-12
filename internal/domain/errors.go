@@ -39,6 +39,10 @@ const (
 	CodeModifierGroupUnsatisfiable ErrorCode = "modifier_group_unsatisfiable"
 	CodeModifierGroupInUse         ErrorCode = "modifier_group_in_use"
 	CodeCatalogUnavailable         ErrorCode = "catalog_unavailable"
+
+	CodeShiftAlreadyOpen     ErrorCode = "shift_already_open"
+	CodeShiftUnfinishedOrder ErrorCode = "shift_has_unfinished_orders"
+	CodeShiftUnavailable     ErrorCode = "shift_unavailable"
 )
 
 // Error is the single error type crossing service boundaries. The HTTP layer

@@ -23,6 +23,10 @@ const (
 	// run out there.
 	PermAvailabilityManage = "product.availability.manage"
 	PermSoldOutToggle      = "product.sold_out.toggle"
+	// Shift permissions are outlet-scoped; a cashier needs an approver who
+	// holds them (step-up).
+	PermShiftOpen  = "shift.open"
+	PermShiftClose = "shift.close"
 )
 
 // AccessScope is the set of roles, and the permissions they carry, that a

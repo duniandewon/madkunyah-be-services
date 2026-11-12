@@ -17,6 +17,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/server"
+	"github.com/duniandewon/madkunyah-be-service/internal/shift"
 	"github.com/duniandewon/madkunyah-be-service/internal/staff"
 	"github.com/duniandewon/madkunyah-be-service/migrations"
 	"github.com/duniandewon/madkunyah-be-service/platform/notifier"
@@ -110,6 +111,9 @@ func run() error {
 			PriceMax: cfg.Catalog.PriceMax,
 			CacheTTL: cfg.Catalog.CacheTTL,
 		}, rdb)),
+		// NoOrders stands in for the close guard until the Orders feature
+		// can report a shift's unfinished orders.
+		Shifts: shift.NewHandler(shift.NewService(shift.NewRepository(db), access, shift.NoOrders{})),
 	})
 
 	errCh := make(chan error, 1)

@@ -11,6 +11,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
+	"github.com/duniandewon/madkunyah-be-service/internal/shift"
 	"github.com/duniandewon/madkunyah-be-service/internal/staff"
 	"github.com/duniandewon/madkunyah-be-service/platform/postgres"
 	"github.com/go-chi/chi/v5"
@@ -31,6 +32,7 @@ type Deps struct {
 	Staff   *staff.Handler
 	POS     *pos.Handler
 	Catalog *catalog.Handler
+	Shifts  *shift.Handler
 }
 
 const (
@@ -121,6 +123,14 @@ func Router(d Deps) http.Handler {
 			outletCatalogRoutes(r, d.Catalog)
 		})
 
+		// Dashboard shift views are read-only: shifts are opened and closed
+		// on the POS alone (FR-SH-8).
+		r.Group(func(r chi.Router) {
+			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access), mw.RequireOutletRole)
+			r.Get("/outlets/{outletID}/shifts", d.Shifts.List)
+			r.Get("/outlets/{outletID}/shifts/{shiftID}", d.Shifts.Get)
+		})
+
 		// Public: the online shop browses without signing in.
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RateLimitIP(d.Redis, "catalog_public", d.Config.Catalog.PublicRateLimit, time.Minute))
@@ -135,6 +145,12 @@ func Router(d Deps) http.Handler {
 			r.With(compress).Get("/catalog", d.Catalog.Bundle)
 			r.With(mw.MaxBodyBytes(catalogBodyLimit), mw.RequireActingStaff(d.Access)).
 				Put("/sold-out", d.Catalog.POSSetSoldOut)
+			r.Group(func(r chi.Router) {
+				r.Use(mw.MaxBodyBytes(shiftBodyLimit), mw.RequireActingStaff(d.Access))
+				r.Get("/shifts/current", d.Shifts.POSCurrent)
+				r.Post("/shifts", d.Shifts.POSOpen)
+				r.Post("/shifts/{shiftID}/close", d.Shifts.POSClose)
+			})
 		})
 	})
 
@@ -143,6 +159,9 @@ func Router(d Deps) http.Handler {
 
 // catalogBodyLimit caps catalog request bodies (NFR-SEC-2).
 const catalogBodyLimit = 64 << 10
+
+// shiftBodyLimit caps shift request bodies, which carry two IDs at most.
+const shiftBodyLimit = 4 << 10
 
 // compress gzips the menu and the POS bundle, the two large catalog
 // responses (NFR-PERF-2).

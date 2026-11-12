@@ -1,20 +1,45 @@
-# Current Feature
+# Current Feature: Shifts Core
 
 <!-- Feature name and short description -->
+
+Open and close shifts on the POS, fix each shift's business date, and give Orders per-shift order sequences. Spec: `context/features/shifts-spec.md`.
 
 ## Status
 
 <!-- Not started | In Progress | Completed -->
 
-Completed
+In Progress
 
 ## Goals
 
 <!-- Goals and requirements -->
 
+- Migration `0006_shifts`: `shifts` (client-generated ID, `closed_device_id`, status and close-field CHECKs, `one_open_shift_per_outlet` partial unique index, business-date index) and `order_sequences`. No `shift_tender_reconciliations`.
+- `POST /v1/pos/shifts` opens a shift: idempotent by client `id` (`201` / `200 applied: false`), `409 shift_already_open` with the open shift in `details` (including races), `409 shift_closed`, `409 conflict` for another outlet's ID; creates `order_sequences` rows for the outlet prefix and `WEB` in the same transaction (FR-OPN).
+- Business date = outlet-local date of `opened_at − business_day_cutoff`, fixed at open, server time only (FR-SH-4, FR-SH-6).
+- `POST /v1/pos/shifts/{shift_id}/close`: locks the shift `FOR UPDATE`, runs the `OrderGuard`, returns `409 shift_has_unfinished_orders` with `details.orders` / `details.count`; idempotent on a closed shift; any active device at the outlet may close (FR-CLS, FR-SH-7).
+- `OrderGuard` interface with a stub that returns none until Orders exists; a fake guard tests the `409` (AC-11).
+- Step-up: acting staff holds `shift.open` / `shift.close`, or `approved_by` names an approver who does, checked by server-side authz in a shared helper Orders can reuse (FR-STP).
+- Internal interface for Orders in `internal/shift`: `Current` (`FOR SHARE`, `ErrNoOpenShift`) and `NextNumber` (`UPDATE … RETURNING`, `POS-001` format, `ErrShiftClosed`) (FR-SEQ).
+- Reads: `GET /v1/pos/shifts/current` (`{ "shift": null }` when none), `GET /v1/outlets/{outlet_id}/shifts` (business-date range ≤ 92 days, status, cursor pagination), `GET /v1/outlets/{outlet_id}/shifts/{shift_id}` (FR-RD).
+- No dashboard route opens or closes a shift (FR-SH-8, AC-14).
+- One `audit_logs` row per open and close in the same transaction (`shift.opened`, `shift.closed`, `approved_by` set); none for no-op retries or rejections (FR-SAUD).
+- New error codes `shift_already_open`, `shift_has_unfinished_orders` (409) and `shift_unavailable` (503, Postgres down or commit uncertain); 4 KB body cap.
+- Tests: business-date table test with injectable clock (AC-1), integration tests AC-2..AC-18 on `TEST_DATABASE_URL`, including concurrent opens, gapless concurrent allocation, rollback not burning a number, and close blocking behind `Current`.
+
 ## Notes
 
 <!-- Any extra notes -->
+
+- Decisions: open and close need a connection, without exception; unfinished orders block close until settlement exists; shifts are opened and closed only on the POS.
+- POS client contract (FR-CLS-2), not server code: before closing, check ongoing orders on the device, then the connection, then sync the queue, then call close. `/v1/sync/batch` must reject shift open/close when it is built.
+- Unfinished = any status other than `completed`, `cancelled`, `expired`, `refunded`. Orders owns the list and replaces the guard stub.
+- POS routes use `RequireActiveDevice` + `RequireActingStaff`; a shift from another outlet is `404`. Dashboard reads need any role at the outlet (`404` otherwise).
+- No Redis use. No new permission strings (`shift.open`, `shift.close` already seeded).
+- Deferred project-wide: Prometheus metrics (§7), OpenAPI. Manual: AC-19, AC-20 (POS app).
+- Out of scope: settlement, shift report, orders, web-order queueing while no shift is open, reopening, auto-close.
+- For Orders to confirm: orders take their shift's `business_date`; handling of a synced order that references a closed shift.
+- Approver PIN is verified only on the device (same trust gap as M3).
 
 ## History
 

@@ -52,11 +52,12 @@ func statusFor(code domain.ErrorCode) int {
 		return http.StatusNotFound
 	case domain.CodeConflict, domain.CodeShiftClosed, domain.CodeDeviceLimit,
 		domain.CodeIdentifierInUse, domain.CodeNameTaken, domain.CodeSKUTaken,
-		domain.CodeLastActiveVariant, domain.CodeModifierGroupUnsatisfiable, domain.CodeModifierGroupInUse:
+		domain.CodeLastActiveVariant, domain.CodeModifierGroupUnsatisfiable, domain.CodeModifierGroupInUse,
+		domain.CodeShiftAlreadyOpen, domain.CodeShiftUnfinishedOrder:
 		return http.StatusConflict
 	case domain.CodeRateLimited, domain.CodeOTPCooldown, domain.CodeOTPQuotaExceeded:
 		return http.StatusTooManyRequests
-	case domain.CodeAuthUnavailable, domain.CodeCatalogUnavailable:
+	case domain.CodeAuthUnavailable, domain.CodeCatalogUnavailable, domain.CodeShiftUnavailable:
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
