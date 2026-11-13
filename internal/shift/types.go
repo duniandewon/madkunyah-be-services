@@ -99,18 +99,10 @@ type UnfinishedOrders struct {
 }
 
 // OrderGuard reports the unfinished orders of a shift, read in the closing
-// transaction: up to limit of them, and the total. Orders implements it;
-// NoOrders stands in until then.
+// transaction: up to limit of them, and the total. order.Guard implements
+// it.
 type OrderGuard interface {
 	UnfinishedOrders(ctx context.Context, q Querier, shiftID string, limit int) ([]OrderRef, int, error)
-}
-
-// NoOrders is the OrderGuard used until the Orders feature exists: with no
-// orders table, no order can block a close.
-type NoOrders struct{}
-
-func (NoOrders) UnfinishedOrders(context.Context, Querier, string, int) ([]OrderRef, int, error) {
-	return nil, 0, nil
 }
 
 // OpenInput is one open request from a device, on behalf of Acting.

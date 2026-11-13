@@ -15,6 +15,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/catalog"
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
+	"github.com/duniandewon/madkunyah-be-service/internal/order"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/server"
 	"github.com/duniandewon/madkunyah-be-service/internal/shift"
@@ -111,9 +112,9 @@ func run() error {
 			PriceMax: cfg.Catalog.PriceMax,
 			CacheTTL: cfg.Catalog.CacheTTL,
 		}, rdb)),
-		// NoOrders stands in for the close guard until the Orders feature
-		// can report a shift's unfinished orders.
-		Shifts: shift.NewHandler(shift.NewService(shift.NewRepository(db), access, shift.NoOrders{})),
+		// Open bills block a shift close (orders FR-GRD).
+		Shifts: shift.NewHandler(shift.NewService(shift.NewRepository(db), access, order.Guard{})),
+		Orders: order.NewHandler(order.NewService(order.NewRepository(db))),
 	})
 
 	errCh := make(chan error, 1)

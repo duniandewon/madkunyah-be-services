@@ -1,20 +1,49 @@
-# Current Feature
+# Current Feature: Orders Core
 
 <!-- Feature name and short description -->
+
+POS orders while online: place an order into the open shift, hold it as an open bill, change or cancel it before payment, record the payment, read orders, and guard shift close. Spec: `context/features/orders-spec.md`.
 
 ## Status
 
 <!-- Not started | In Progress | Completed -->
 
-Completed
+In Progress
 
 ## Goals
 
 <!-- Goals and requirements -->
 
+- Migration `0007_orders`: `orders`, `order_lines`, `order_line_modifiers`, `order_status_events`, `payments`, `outbox_events`, with the CHECKs and indexes of spec §8 (one settled payment per order; no role changes)
+- `POST /v1/pos/orders`: place an order in one transaction (`shift.Current` → `catalog.Quote` Strict at now → `shift.NextNumber` → inserts), `status = placed`, the shift's `business_date`; idempotent by client order `id`; `409 no_open_shift`, `409 lines_unavailable` with per-line details and no number burned (FR-PLC)
+- Totals from active lines only, stored on the order; `fulfillment_summary` derived; snapshots never re-priced; no price accepted from the client (FR-TOT)
+- `POST /v1/pos/orders/{order_id}/lines`: add lines to an open bill, idempotent by line ID, max 100 lines per order (FR-ADD)
+- `POST /v1/pos/orders/{order_id}/lines/{line_id}/void`: void a line with a mandatory reason; `409 last_active_line` (FR-VOID)
+- `POST /v1/pos/orders/{order_id}/cancel`: cancel an open bill with a mandatory reason; lines and totals kept (FR-CAN)
+- `POST /v1/pos/orders/{order_id}/payments`: record `qris_static` / `card_edc` as settled, optional `external_ref`; amount must equal `grand_total` (`409 amount_mismatch`); sets `paid_at` and `completed`; idempotent by payment `id`; `409 order_already_paid` (FR-PAY)
+- Every change locks the order row; changes to a completed or cancelled order return `409 order_not_open` (FR-ORD-6/7)
+- Shift close guard: `internal/order` implements `shift.OrderGuard`, wired in `cmd/api/main.go` in place of `shift.NoOrders{}`; owns shifts AC-11 (FR-GRD)
+- Reads: `GET /v1/pos/orders` (defaults to the open shift, `status=placed` = open bills), `GET /v1/pos/orders/{order_id}`, dashboard `GET /v1/outlets/{outlet_id}/orders` (business-date range ≤ 92 days, status, shift, exact order number, cursor pagination) and `GET …/orders/{order_id}`; `unit_cost` never returned (FR-RD)
+- Authorization: `order.create`, `order.void.unpaid`, `payment.record` checked server side on POS routes behind `RequireActiveDevice` + `RequireActingStaff`; dashboard reads for any role at the outlet (§3.8)
+- One `order_status_events` row per status change; `audit_logs` rows for `order.line_voided` and `order.cancelled` with `value_delta` and reason; none for no-ops (FR-ORD-4, FR-OAUD)
+- Outbox rows `order.placed`, `order.updated`, `order.cancelled`, `order.paid` in the same transaction; no worker (FR-EVT)
+- New error codes `no_open_shift`, `lines_unavailable`, `order_not_open`, `last_active_line`, `amount_mismatch`, `order_already_paid` (409), `order_unavailable` (503); permission constants `PermOrderCreate`, `PermOrderVoidUnpaid`, `PermPaymentRecord`
+- Acceptance criteria AC-1..AC-26 of the spec pass as integration tests on `TEST_DATABASE_URL`, plus the totals unit test table; `go build`, `go vet`, golangci-lint clean
+- Update `context/spec/data-model.md` and `context/spec/flows-and-api.md` to match (spec §8)
+
 ## Notes
 
 <!-- Any extra notes -->
+
+- **Flow:** cashier taps *Process order* (order `placed`, numbered) → may add lines, void lines or cancel until payment → payment completes the order. No server-side drafts; no separate handover step.
+- **Online only.** The POS needs a connection to place an order or record a payment until Offline Sync exists. All timestamps are server time.
+- **No step-up in this slice.** Every role holds the three permissions used; no route accepts `approved_by`.
+- **Paid void is not built here.** Decided: any holder of `order.void.paid` (supervisor, manager, owner), both on the POS with step-up and from the dashboard → Refunds + Paid Void spec. Role permissions are unchanged.
+- **No charges at launch.** `discount_total`, `service_charge`, `packaging_fee`, `tax_total` stay 0 and `tax_breakdown` is `{}`, so `grand_total = subtotal`.
+- **Retries** are made safe by client-generated order, line and payment IDs, not an `Idempotency-Key` header. A retry returns the stored order without comparing the body.
+- **Zero-total orders** are completed by a payment of `amount = 0`.
+- **Out of scope:** discounts and price override (POS Controls); `/v1/sync/batch` (Offline Sync); web orders, Midtrans, tracking token, guest fields and guest linking (Web Orders + Midtrans); refunds; kitchen statuses and kitchen notification; in-place line edits and header edits; split payments; outbox worker; receipts; Prometheus metrics and OpenAPI (deferred project-wide).
+- **Later specs, recommended order:** POS Controls → Offline Sync → Web Orders + Midtrans → Refunds + Paid Void.
 
 ## History
 

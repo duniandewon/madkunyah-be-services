@@ -38,3 +38,40 @@ func TestShiftRoutes(t *testing.T) {
 		}
 	}
 }
+
+// Orders are changed on the POS alone; the dashboard only reads them
+// (orders-spec §3.8, AC-25).
+func TestOrderRoutes(t *testing.T) {
+	routes := map[string]bool{}
+	router := Router(Deps{Config: &config.Config{}}).(chi.Routes)
+	err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		routes[method+" "+strings.TrimSuffix(route, "/")] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"POST /v1/pos/orders",
+		"GET /v1/pos/orders",
+		"GET /v1/pos/orders/{orderID}",
+		"POST /v1/pos/orders/{orderID}/lines",
+		"POST /v1/pos/orders/{orderID}/lines/{lineID}/void",
+		"POST /v1/pos/orders/{orderID}/cancel",
+		"POST /v1/pos/orders/{orderID}/payments",
+		"GET /v1/outlets/{outletID}/orders",
+		"GET /v1/outlets/{outletID}/orders/{orderID}",
+	} {
+		if !routes[want] {
+			t.Errorf("route %q is not mounted", want)
+		}
+	}
+	for r := range routes {
+		if strings.Contains(r, "/outlets/{outletID}/orders") && !strings.HasPrefix(r, "GET ") {
+			t.Errorf("dashboard route %q can change an order", r)
+		}
+		if strings.HasPrefix(r, "PATCH /v1/orders") || strings.HasPrefix(r, "POST /v1/orders") {
+			t.Errorf("route %q is left for web checkout", r)
+		}
+	}
+}

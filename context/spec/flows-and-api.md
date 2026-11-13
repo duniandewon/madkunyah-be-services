@@ -51,18 +51,17 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-  [*] --> draft: POS ticket opened
-  draft --> placed: submit
+  [*] --> placed: POS "Process order" (numbered)
+  placed --> placed: add lines / void a line
+  placed --> completed: payment recorded
+  placed --> cancelled: cancelled before payment (reason)
   [*] --> pending_payment: web checkout
   pending_payment --> placed: webhook settled
   pending_payment --> expired: QRIS expiry
-  placed --> preparing: kitchen accepts
-  preparing --> ready: cooking done
-  ready --> completed: handed over
-  placed --> cancelled: supervisor void
-  preparing --> cancelled: supervisor void
   completed --> refunded: refund issued
 ```
+
+There are no server-side drafts: a POS ticket exists only on the device until *Process order*. A POS order is `placed` as an open bill and **payment completes it**; there is no separate handover step. `paid_at` marks payment and is not a status. A paid order is voided only by a holder of `order.void.paid` (Refunds + Paid Void). `preparing` and `ready` are allowed by the schema for kitchen statuses later.
 
 Web orders never enter `placed` on a client callback — only on a verified webhook.
 
@@ -116,14 +115,20 @@ GET    /v1/me/orders                     # accounts only
 POST   /v1/webhooks/midtrans
 ```
 
-**POS (staff)**
+**POS (device token + `X-Acting-Staff-Id`; outlet from the token)**
 
 ```
-POST   /v1/shifts/open                   POST /v1/shifts/{id}/close
+GET    /v1/pos/shifts/current            POST /v1/pos/shifts
+POST   /v1/pos/shifts/{id}/close
 GET    /v1/pos/catalog                   # versioned bundle for offline use
-POST   /v1/orders                        # Idempotency-Key required
-PATCH  /v1/orders/{id}/lines             POST /v1/orders/{id}/lines/{lid}/void
-POST   /v1/orders/{id}/payments          POST /v1/orders/{id}/refunds
+POST   /v1/pos/orders                    # process order; retry-safe by client order id
+GET    /v1/pos/orders                    # ?status=placed = open bills of the open shift
+GET    /v1/pos/orders/{id}
+POST   /v1/pos/orders/{id}/lines         # add lines; retry-safe by line ids
+POST   /v1/pos/orders/{id}/lines/{lid}/void
+POST   /v1/pos/orders/{id}/cancel
+POST   /v1/pos/orders/{id}/payments      # retry-safe by client payment id
+POST   /v1/pos/orders/{id}/refunds       # Refunds + Paid Void
 POST   /v1/sync/batch                    # replay queued offline operations
 ```
 
@@ -134,6 +139,8 @@ GET    /v1/reports/sales?from&to&outlet_id&channel&group_by
 GET    /v1/reports/products              GET /v1/reports/employees
 GET    /v1/reports/voids-discounts       GET /v1/reports/tender-variance
 GET    /v1/reports/shifts/{id}
+GET    /v1/outlets/{id}/shifts           GET /v1/outlets/{id}/shifts/{sid}
+GET    /v1/outlets/{id}/orders           GET /v1/outlets/{id}/orders/{oid}
 CRUD   /v1/products  /v1/categories  /v1/modifiers
 CRUD   /v1/staff     /v1/outlets     /v1/devices
 GET    /v1/inventory/stock               POST /v1/inventory/movements

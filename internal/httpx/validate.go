@@ -55,10 +55,23 @@ func describe(fe validator.FieldError) string {
 	case "numeric":
 		return "must contain only digits"
 	case "max":
-		if fe.Kind() == reflect.String {
+		switch fe.Kind() {
+		case reflect.String:
 			return "must be at most " + fe.Param() + " characters"
+		case reflect.Slice, reflect.Array, reflect.Map:
+			return "must have at most " + fe.Param() + " items"
+		default:
+			return "must be at most " + fe.Param()
 		}
-		return "must have at most " + fe.Param() + " items"
+	case "min":
+		switch fe.Kind() {
+		case reflect.String:
+			return "must be at least " + fe.Param() + " characters"
+		case reflect.Slice, reflect.Array, reflect.Map:
+			return "must have at least " + fe.Param() + " items"
+		default:
+			return "must be at least " + fe.Param()
+		}
 	case "uuid":
 		return "must be a UUID"
 	default:

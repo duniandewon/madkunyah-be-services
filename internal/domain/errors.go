@@ -43,6 +43,14 @@ const (
 	CodeShiftAlreadyOpen     ErrorCode = "shift_already_open"
 	CodeShiftUnfinishedOrder ErrorCode = "shift_has_unfinished_orders"
 	CodeShiftUnavailable     ErrorCode = "shift_unavailable"
+
+	CodeNoOpenShift      ErrorCode = "no_open_shift"
+	CodeLinesUnavailable ErrorCode = "lines_unavailable"
+	CodeOrderNotOpen     ErrorCode = "order_not_open"
+	CodeLastActiveLine   ErrorCode = "last_active_line"
+	CodeAmountMismatch   ErrorCode = "amount_mismatch"
+	CodeOrderAlreadyPaid ErrorCode = "order_already_paid"
+	CodeOrderUnavailable ErrorCode = "order_unavailable"
 )
 
 // Error is the single error type crossing service boundaries. The HTTP layer

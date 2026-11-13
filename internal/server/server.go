@@ -10,6 +10,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
+	"github.com/duniandewon/madkunyah-be-service/internal/order"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/shift"
 	"github.com/duniandewon/madkunyah-be-service/internal/staff"
@@ -33,6 +34,7 @@ type Deps struct {
 	POS     *pos.Handler
 	Catalog *catalog.Handler
 	Shifts  *shift.Handler
+	Orders  *order.Handler
 }
 
 const (
@@ -129,6 +131,8 @@ func Router(d Deps) http.Handler {
 			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access), mw.RequireOutletRole)
 			r.Get("/outlets/{outletID}/shifts", d.Shifts.List)
 			r.Get("/outlets/{outletID}/shifts/{shiftID}", d.Shifts.Get)
+			r.Get("/outlets/{outletID}/orders", d.Orders.List)
+			r.Get("/outlets/{outletID}/orders/{orderID}", d.Orders.Get)
 		})
 
 		// Public: the online shop browses without signing in.
@@ -151,6 +155,10 @@ func Router(d Deps) http.Handler {
 				r.Post("/shifts", d.Shifts.POSOpen)
 				r.Post("/shifts/{shiftID}/close", d.Shifts.POSClose)
 			})
+			r.Group(func(r chi.Router) {
+				r.Use(mw.RequireActingStaff(d.Access))
+				posOrderRoutes(r, d.Orders)
+			})
 		})
 	})
 
@@ -162,6 +170,25 @@ const catalogBodyLimit = 64 << 10
 
 // shiftBodyLimit caps shift request bodies, which carry two IDs at most.
 const shiftBodyLimit = 4 << 10
+
+// orderBodyLimit caps placement and add-lines bodies, which carry up to
+// 100 lines; the other order bodies take shiftBodyLimit (NFR-SEC-3).
+const orderBodyLimit = 64 << 10
+
+// posOrderRoutes mounts the POS order routes. Permissions are checked per
+// action in the service; reads need only a role at the outlet, which
+// RequireActingStaff already enforces.
+func posOrderRoutes(r chi.Router, h *order.Handler) {
+	lines := r.With(mw.MaxBodyBytes(orderBodyLimit))
+	small := r.With(mw.MaxBodyBytes(shiftBodyLimit))
+	r.Get("/orders", h.POSList)
+	r.Get("/orders/{orderID}", h.POSGet)
+	lines.Post("/orders", h.POSPlace)
+	lines.Post("/orders/{orderID}/lines", h.POSAddLines)
+	small.Post("/orders/{orderID}/lines/{lineID}/void", h.POSVoidLine)
+	small.Post("/orders/{orderID}/cancel", h.POSCancel)
+	small.Post("/orders/{orderID}/payments", h.POSPay)
+}
 
 // compress gzips the menu and the POS bundle, the two large catalog
 // responses (NFR-PERF-2).

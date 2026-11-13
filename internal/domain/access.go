@@ -27,6 +27,11 @@ const (
 	// holds them (step-up).
 	PermShiftOpen  = "shift.open"
 	PermShiftClose = "shift.close"
+	// Order permissions are outlet-scoped and held by every role, so no
+	// order route in Orders Core needs step-up.
+	PermOrderCreate     = "order.create"
+	PermOrderVoidUnpaid = "order.void.unpaid"
+	PermPaymentRecord   = "payment.record"
 )
 
 // AccessScope is the set of roles, and the permissions they carry, that a
