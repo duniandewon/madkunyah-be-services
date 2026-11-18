@@ -188,6 +188,14 @@ func posOrderRoutes(r chi.Router, h *order.Handler) {
 	small.Post("/orders/{orderID}/lines/{lineID}/void", h.POSVoidLine)
 	small.Post("/orders/{orderID}/cancel", h.POSCancel)
 	small.Post("/orders/{orderID}/payments", h.POSPay)
+	// POS controls (pos-controls FR-OPN-1); step-up is checked in the
+	// service.
+	small.Put("/orders/{orderID}/discount", h.POSSetOrderDiscount)
+	small.Delete("/orders/{orderID}/discount", h.POSRemoveOrderDiscount)
+	small.Put("/orders/{orderID}/lines/{lineID}/discount", h.POSSetLineDiscount)
+	small.Delete("/orders/{orderID}/lines/{lineID}/discount", h.POSRemoveLineDiscount)
+	small.Put("/orders/{orderID}/lines/{lineID}/price", h.POSSetPrice)
+	small.Delete("/orders/{orderID}/lines/{lineID}/price", h.POSRemovePrice)
 }
 
 // compress gzips the menu and the POS bundle, the two large catalog

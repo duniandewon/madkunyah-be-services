@@ -121,13 +121,19 @@ POST   /v1/webhooks/midtrans
 GET    /v1/pos/shifts/current            POST /v1/pos/shifts
 POST   /v1/pos/shifts/{id}/close
 GET    /v1/pos/catalog                   # versioned bundle for offline use
-POST   /v1/pos/orders                    # process order; retry-safe by client order id
+POST   /v1/pos/orders                    # process order; retry-safe by client order id; line and order controls
 GET    /v1/pos/orders                    # ?status=placed = open bills of the open shift
 GET    /v1/pos/orders/{id}
-POST   /v1/pos/orders/{id}/lines         # add lines; retry-safe by line ids
+POST   /v1/pos/orders/{id}/lines         # add lines; retry-safe by line ids; line controls
 POST   /v1/pos/orders/{id}/lines/{lid}/void
 POST   /v1/pos/orders/{id}/cancel
 POST   /v1/pos/orders/{id}/payments      # retry-safe by client payment id
+PUT    /v1/pos/orders/{id}/discount      # order discount; step-up order.discount
+DELETE /v1/pos/orders/{id}/discount
+PUT    /v1/pos/orders/{id}/lines/{lid}/discount   # line discount; step-up order.discount
+DELETE /v1/pos/orders/{id}/lines/{lid}/discount
+PUT    /v1/pos/orders/{id}/lines/{lid}/price      # price override; step-up order.price_override
+DELETE /v1/pos/orders/{id}/lines/{lid}/price
 POST   /v1/pos/orders/{id}/refunds       # Refunds + Paid Void
 POST   /v1/sync/batch                    # replay queued offline operations
 ```

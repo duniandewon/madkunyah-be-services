@@ -32,6 +32,10 @@ const (
 	PermOrderCreate     = "order.create"
 	PermOrderVoidUnpaid = "order.void.unpaid"
 	PermPaymentRecord   = "payment.record"
+	// POS controls need step-up: supervisor, manager and owner hold them
+	// (pos-controls-spec FR-STP-1).
+	PermOrderDiscount      = "order.discount"
+	PermOrderPriceOverride = "order.price_override"
 )
 
 // AccessScope is the set of roles, and the permissions they carry, that a

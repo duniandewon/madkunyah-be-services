@@ -51,6 +51,9 @@ const (
 	CodeAmountMismatch   ErrorCode = "amount_mismatch"
 	CodeOrderAlreadyPaid ErrorCode = "order_already_paid"
 	CodeOrderUnavailable ErrorCode = "order_unavailable"
+
+	CodeLineNotActive        ErrorCode = "line_not_active"
+	CodeDiscountExceedsTotal ErrorCode = "discount_exceeds_total"
 )
 
 // Error is the single error type crossing service boundaries. The HTTP layer

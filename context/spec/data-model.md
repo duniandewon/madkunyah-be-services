@@ -289,12 +289,21 @@ CREATE TABLE orders (
   note                TEXT,
 
   subtotal            BIGINT NOT NULL DEFAULT 0 CHECK (subtotal >= 0),
-  discount_total      BIGINT NOT NULL DEFAULT 0 CHECK (discount_total >= 0),
+  discount_total      BIGINT NOT NULL DEFAULT 0 CHECK (discount_total >= 0),  -- order-level discount only
   service_charge      BIGINT NOT NULL DEFAULT 0 CHECK (service_charge >= 0),
   packaging_fee       BIGINT NOT NULL DEFAULT 0 CHECK (packaging_fee >= 0),
   tax_total           BIGINT NOT NULL DEFAULT 0 CHECK (tax_total >= 0),
   grand_total         BIGINT NOT NULL DEFAULT 0 CHECK (grand_total >= 0),
   tax_breakdown       JSONB  NOT NULL DEFAULT '{}',
+
+  -- Order discount (POS Controls, 0008). A fixed one clamped by a smaller
+  -- subtotal keeps its value with a smaller discount_total.
+  discount_type        TEXT CHECK (discount_type IN ('percent', 'fixed')),
+  discount_value       BIGINT CHECK (discount_value > 0),
+  discount_reason      TEXT,
+  discounted_by        UUID REFERENCES staff(id),
+  discount_approved_by UUID REFERENCES staff(id),
+  discounted_at        TIMESTAMPTZ,
 
   business_date       DATE NOT NULL,                       -- the shift's
   placed_at           TIMESTAMPTZ,
@@ -306,7 +315,18 @@ CREATE TABLE orders (
   -- The number is unique only within its shift.
   UNIQUE (outlet_id, shift_id, order_prefix, order_sequence),
   -- A counter order always has a device and a staff member.
-  CHECK (channel <> 'pos' OR (device_id IS NOT NULL AND created_by IS NOT NULL))
+  CHECK (channel <> 'pos' OR (device_id IS NOT NULL AND created_by IS NOT NULL)),
+  -- The discount fields are all set or all null.
+  CONSTRAINT orders_discount_all_or_none CHECK (
+    (discount_type IS NULL) = (discount_value IS NULL) AND
+    (discount_type IS NULL) = (discount_reason IS NULL) AND
+    (discount_type IS NULL) = (discounted_by IS NULL) AND
+    (discount_type IS NULL) = (discount_approved_by IS NULL) AND
+    (discount_type IS NULL) = (discounted_at IS NULL)),
+  CONSTRAINT orders_discount_percent_range CHECK (
+    discount_type IS DISTINCT FROM 'percent' OR discount_value <= 100),
+  CONSTRAINT orders_no_total_without_discount CHECK (
+    discount_type IS NOT NULL OR discount_total = 0)
 );
 
 CREATE INDEX orders_shift_status_idx ON orders (shift_id, status, created_at DESC);  -- guard, POS list
@@ -333,10 +353,25 @@ CREATE TABLE order_lines (
   quantity           INT    NOT NULL CHECK (quantity > 0),
   fulfillment_type   TEXT   NOT NULL CHECK (fulfillment_type IN ('dine_in', 'takeaway')),
 
-  discount_amount    BIGINT NOT NULL DEFAULT 0 CHECK (discount_amount >= 0),  -- unused until POS Controls
+  -- line_total = unit_price × quantity − discount_amount; net line revenue
+  -- is line_total − order_discount_share.
+  discount_amount    BIGINT NOT NULL DEFAULT 0 CHECK (discount_amount >= 0),  -- line discount
   discount_reason    TEXT,
   line_total         BIGINT NOT NULL CHECK (line_total >= 0),
   note               TEXT,
+
+  -- Line discount and price override (POS Controls, 0008).
+  discount_type              TEXT CHECK (discount_type IN ('percent', 'fixed')),
+  discount_value             BIGINT CHECK (discount_value > 0),
+  discounted_by              UUID REFERENCES staff(id),
+  discount_approved_by       UUID REFERENCES staff(id),
+  discounted_at              TIMESTAMPTZ,
+  order_discount_share       BIGINT NOT NULL DEFAULT 0 CHECK (order_discount_share >= 0),
+  original_unit_price        BIGINT CHECK (original_unit_price >= 0),  -- the Quote price while overridden
+  price_override_reason      TEXT,
+  price_overridden_by        UUID REFERENCES staff(id),
+  price_override_approved_by UUID REFERENCES staff(id),
+  price_overridden_at        TIMESTAMPTZ,
 
   status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'voided')),
   voided_by          UUID REFERENCES staff(id),
@@ -347,7 +382,25 @@ CREATE TABLE order_lines (
   UNIQUE (order_id, line_no),
   -- The void fields are all set or all null.
   CHECK ((status = 'voided') = (voided_at IS NOT NULL)),
-  CHECK ((status = 'voided') = (void_reason IS NOT NULL))
+  CHECK ((status = 'voided') = (void_reason IS NOT NULL)),
+  -- The discount fields (with discount_reason) are all set or all null.
+  CONSTRAINT order_lines_discount_all_or_none CHECK (
+    (discount_type IS NULL) = (discount_value IS NULL) AND
+    (discount_type IS NULL) = (discount_reason IS NULL) AND
+    (discount_type IS NULL) = (discounted_by IS NULL) AND
+    (discount_type IS NULL) = (discount_approved_by IS NULL) AND
+    (discount_type IS NULL) = (discounted_at IS NULL)),
+  CONSTRAINT order_lines_discount_percent_range CHECK (
+    discount_type IS DISTINCT FROM 'percent' OR discount_value <= 100),
+  CONSTRAINT order_lines_no_amount_without_discount CHECK (
+    discount_type IS NOT NULL OR discount_amount = 0),
+  CONSTRAINT order_lines_share_within_total CHECK (order_discount_share <= line_total),
+  -- The override fields are all set or all null.
+  CONSTRAINT order_lines_override_all_or_none CHECK (
+    (original_unit_price IS NULL) = (price_override_reason IS NULL) AND
+    (original_unit_price IS NULL) = (price_overridden_by IS NULL) AND
+    (original_unit_price IS NULL) = (price_override_approved_by IS NULL) AND
+    (original_unit_price IS NULL) = (price_overridden_at IS NULL))
 );
 
 CREATE TABLE order_line_modifiers (

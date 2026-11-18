@@ -13,9 +13,17 @@ import (
 
 // pricedLine is a requested line with its catalog snapshot.
 type pricedLine struct {
-	in        *LineInput
-	snap      *catalog.LineSnapshot
-	lineTotal int64
+	in   *LineInput
+	snap *catalog.LineSnapshot
+}
+
+// unitPrice is the price charged: the override's when there is one, else
+// the quoted one (pos-controls FR-TOT-7).
+func (p pricedLine) unitPrice() int64 {
+	if p.in.Override != nil {
+		return p.in.Override.UnitPrice
+	}
+	return p.snap.UnitPrice
 }
 
 // priceLines prices lines with catalog.Quote in the caller's transaction:
@@ -49,8 +57,7 @@ func priceLines(ctx context.Context, q catalog.Querier, outletID string, at time
 	}
 	priced := make([]pricedLine, len(lines))
 	for i := range lines {
-		snap := res.Lines[i].Snapshot
-		priced[i] = pricedLine{in: &lines[i], snap: snap, lineTotal: lineTotal(snap.UnitPrice, lines[i].Quantity, 0)}
+		priced[i] = pricedLine{in: &lines[i], snap: res.Lines[i].Snapshot}
 	}
 	return priced, nil
 }

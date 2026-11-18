@@ -1,20 +1,42 @@
-# Current Feature
+# Current Feature: POS Controls
 
 <!-- Feature name and short description -->
+
+Supervised changes to what an open bill charges: line discounts, order discounts and price overrides, each percent or fixed (overrides set a unit price), with server-side step-up through `authz.Approver` and an audit row per change. Accepted on place, add-lines and dedicated open-bill routes; never after payment. Spec: `context/features/pos-controls-spec.md`.
 
 ## Status
 
 <!-- Not started | In Progress | Completed -->
 
-Not Started
+In Progress
 
 ## Goals
 
 <!-- Goals and requirements -->
 
+- Migration `0008_pos_controls`: discount and override columns on `order_lines` (incl. `order_discount_share`, `original_unit_price`) and order discount columns on `orders`, with the all-or-none, percent-range and share CHECKs of spec §8
+- Control objects: discount `{type: percent|fixed, value, reason, approved_by}` (percent 1–100, fixed 1..`CATALOG_PRICE_MAX`, reason 3–280 trimmed); price override `{unit_price, reason, approved_by}` (0..`CATALOG_PRICE_MAX`, replaces the whole unit price); one of each per line, one order discount; amounts always computed server side (FR-CTL)
+- Totals in one pure function in `totals.go`: override → line discount (half-up) → `line_total` → `subtotal` → order discount (half-up, fixed clamped on recompute) → `grand_total`; order discount allocated to active lines by largest remainder, Σ shares exact; recomputed on every add, void and control change; `409 discount_exceeds_total` with `details.max` (FR-TOT-7..16)
+- Step-up: `authz.Approver` with `PermOrderDiscount` / `PermOrderPriceOverride` per control, before the transaction; removal needs the same permission; any failing approval → `403`, nothing written; no re-check on `applied: false` retries (FR-STP)
+- Place and add-lines accept per-line `discount` / `price_override`; placement also accepts an order `discount` (add-lines → `400`); one failing control rejects the whole request and uses no number (FR-PLA)
+- Open-bill routes `PUT`/`DELETE` for `/v1/pos/orders/{id}/discount`, `…/lines/{line_id}/discount`, `…/lines/{line_id}/price`: row lock, replace semantics, no-ops `200 applied: false` (reason-only change is a no-op; override to the original price = removal), `409 order_not_open`, `409 line_not_active`, 4 KB body cap (FR-OPN)
+- Voids reallocate the order discount and keep the voided line's control columns; cancel keeps everything; percent order discount follows added lines (FR-INT)
+- Reads (POS and dashboard) return the order `discount` object, and per line `discount`, `price_override` and `order_discount_share`, with staff names; fixed query count; no `unit_cost` (FR-RDX)
+- Audit rows `line.discount`, `line.discount_removed`, `price.override`, `price.override_removed`, `order.discount`, `order.discount_removed` in the same transaction with `approved_by`, `before`/`after`, `value_delta` = change in `grand_total`; none for recomputes or no-ops; one `order.updated` outbox row per applied change (FR-CAUD, FR-OPN-7)
+- New error codes `line_not_active`, `discount_exceeds_total` (409); permission constants `PermOrderDiscount`, `PermOrderPriceOverride`
+- Acceptance criteria AC-1..AC-20 of the spec pass (totals unit table, integration tests on `TEST_DATABASE_URL` incl. the discount vs payment race and uncertain commit, route walk); `go build`, `go vet`, golangci-lint clean
+- Update `context/spec/data-model.md` and `context/spec/flows-and-api.md` to match (spec §8)
+
 ## Notes
 
 <!-- Any extra notes -->
+
+- **Decisions:** line and order discounts; percent and fixed; controls on place/add-lines and on an open bill; no no-charge tender (zero-total orders still paid with `amount = 0`).
+- **Meaning of existing columns is unchanged:** `discount_amount` = line discount, `discount_total` = order-level discount only, `line_total` = gross − line discount. Net line revenue = `line_total − order_discount_share`.
+- **Audit records the decision, columns record the money.** A percent order discount that moves with added lines, or a fixed one clamped after a void, writes no new audit row.
+- **Approver PIN is checked on the device only** (open item M3); the server checks that `approved_by` holds the permission at the outlet.
+- **No size limit per role:** anyone with `order.discount` can give 100%.
+- **Out of scope:** preset/named discounts, vouchers and promo rules, no-charge tender, changes after payment (Refunds + Paid Void), FR-STEP-6 and `authz.offline_violation` (Offline Sync), server-side PIN proof, the void/discount report (Reports), dashboard writes, per-role limits, Prometheus metrics and OpenAPI.
 
 ## History
 

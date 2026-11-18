@@ -58,6 +58,9 @@ func (f fakeAccess) Access(_ context.Context, id string) (*domain.StaffAccess, e
 	return &domain.StaffAccess{StaffID: id}, nil
 }
 
+// testPriceMax is CATALOG_PRICE_MAX's default.
+const testPriceMax = 100_000_000
+
 var orderPerms = []string{domain.PermOrderCreate, domain.PermOrderVoidUnpaid, domain.PermPaymentRecord}
 
 // env is one outlet with a device, staff, a small catalog, and the order
@@ -83,7 +86,7 @@ func newEnv(t *testing.T) *env {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	e := &env{t: t, ctx: context.Background(), access: fakeAccess{}}
-	e.svc = NewService(NewRepository(testDB))
+	e.svc = NewService(NewRepository(testDB), e.access)
 	e.shifts = shift.NewService(shift.NewRepository(testDB), e.access, Guard{})
 	e.outlet = e.newOutlet()
 	e.device = e.newDevice(e.outlet)
@@ -830,7 +833,7 @@ func TestCloseWaitsForPlacement(t *testing.T) {
 	e := newEnv(t)
 	sh := e.openShift()
 	g := gatedRunner{entered: make(chan struct{}), gate: make(chan struct{})}
-	e.svc = &Service{repo: &Repository{tx: g, pool: testDB.Pool}, now: time.Now}
+	e.svc = &Service{repo: &Repository{tx: g, pool: testDB.Pool}, access: e.access, now: time.Now}
 
 	placed := make(chan *Result, 1)
 	go func() {
@@ -890,7 +893,7 @@ func TestCommitUncertain(t *testing.T) {
 	e.openShift()
 	normal := e.svc
 	for _, committed := range []bool{true, false} {
-		e.svc = &Service{repo: &Repository{tx: uncertainRunner{commit: committed}, pool: testDB.Pool}, now: time.Now}
+		e.svc = &Service{repo: &Repository{tx: uncertainRunner{commit: committed}, pool: testDB.Pool}, access: e.access, now: time.Now}
 		id := uuid.NewString()
 		body := placeBody(id, `{"id":"`+uuid.NewString()+`","product_id":"`+e.tea.String()+
 			`","quantity":1,"fulfillment_type":"dine_in"}`)
@@ -927,7 +930,7 @@ func (f fakeDevices) DeviceActive(context.Context, string, string) (bool, error)
 // posRouter mounts the POS order routes as the server does, for this
 // env's device at outletID.
 func (e *env) posRouter(outletID string, active bool) http.Handler {
-	h := NewHandler(e.svc)
+	h := NewHandler(e.svc, testPriceMax)
 	p := &domain.Principal{Subject: e.device, Audience: domain.AudiencePOS, OutletID: outletID, DeviceID: e.device}
 	r := chi.NewRouter()
 	r.Route("/v1/pos", func(r chi.Router) {
@@ -942,13 +945,19 @@ func (e *env) posRouter(outletID string, active bool) http.Handler {
 		small.Post("/orders/{orderID}/lines/{lineID}/void", h.POSVoidLine)
 		small.Post("/orders/{orderID}/cancel", h.POSCancel)
 		small.Post("/orders/{orderID}/payments", h.POSPay)
+		small.Put("/orders/{orderID}/discount", h.POSSetOrderDiscount)
+		small.Delete("/orders/{orderID}/discount", h.POSRemoveOrderDiscount)
+		small.Put("/orders/{orderID}/lines/{lineID}/discount", h.POSSetLineDiscount)
+		small.Delete("/orders/{orderID}/lines/{lineID}/discount", h.POSRemoveLineDiscount)
+		small.Put("/orders/{orderID}/lines/{lineID}/price", h.POSSetPrice)
+		small.Delete("/orders/{orderID}/lines/{lineID}/price", h.POSRemovePrice)
 	})
 	return r
 }
 
 // dashRouter mounts the dashboard order routes as the server does.
 func (e *env) dashRouter(staffID string) http.Handler {
-	h := NewHandler(e.svc)
+	h := NewHandler(e.svc, testPriceMax)
 	p := &domain.Principal{Subject: staffID, Audience: domain.AudienceStaff}
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {

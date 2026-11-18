@@ -59,6 +59,13 @@ func TestOrderRoutes(t *testing.T) {
 		"POST /v1/pos/orders/{orderID}/lines/{lineID}/void",
 		"POST /v1/pos/orders/{orderID}/cancel",
 		"POST /v1/pos/orders/{orderID}/payments",
+		// POS controls (pos-controls AC-19).
+		"PUT /v1/pos/orders/{orderID}/discount",
+		"DELETE /v1/pos/orders/{orderID}/discount",
+		"PUT /v1/pos/orders/{orderID}/lines/{lineID}/discount",
+		"DELETE /v1/pos/orders/{orderID}/lines/{lineID}/discount",
+		"PUT /v1/pos/orders/{orderID}/lines/{lineID}/price",
+		"DELETE /v1/pos/orders/{orderID}/lines/{lineID}/price",
 		"GET /v1/outlets/{outletID}/orders",
 		"GET /v1/outlets/{outletID}/orders/{orderID}",
 	} {

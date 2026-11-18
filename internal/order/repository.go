@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -26,25 +27,44 @@ const (
 		ORDER BY prefix = $2, prefix
 		LIMIT 1`
 
+	// The order discount, when there is one, is applied by the creator at
+	// placement (pos-controls FR-PLA-1).
 	insertOrder = `
 		INSERT INTO orders (id, outlet_id, shift_id, device_id, order_prefix, order_sequence, order_number,
-		                    channel, fulfillment_summary, status, table_number, note, subtotal, grand_total,
-		                    business_date, placed_at, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pos', $8, 'placed', $9, $10, $11, $12, $13::date, $14, $15, $14, $14)`
+		                    channel, fulfillment_summary, status, table_number, note, subtotal, discount_total,
+		                    grand_total, business_date, placed_at, created_by, created_at, updated_at,
+		                    discount_type, discount_value, discount_reason, discounted_by, discount_approved_by,
+		                    discounted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pos', $8, 'placed', $9, $10, $11, $12, $13, $14::date,
+		        $15::timestamptz, $16::uuid, $15, $15, $17::text, $18, $19,
+		        CASE WHEN $17::text IS NULL THEN NULL ELSE $16::uuid END, $20::uuid,
+		        CASE WHEN $17::text IS NULL THEN NULL ELSE $15::timestamptz END)`
 
 	// Lines and modifiers go in one statement each, whatever the count
 	// (NFR-PERF-1). Nullable UUIDs travel as text.
+	// A line's controls are applied by the staff member adding it.
 	insertLines = `
 		INSERT INTO order_lines (id, order_id, line_no, product_id, product_variant_id, product_name, variant_name,
 		                         category_id, category_name, unit_price, unit_cost, quantity, fulfillment_type,
-		                         line_total, note, created_by, created_at)
+		                         line_total, note, created_by, created_at,
+		                         discount_type, discount_value, discount_reason, discounted_by, discount_approved_by,
+		                         discounted_at, discount_amount, order_discount_share,
+		                         original_unit_price, price_override_reason, price_overridden_by,
+		                         price_override_approved_by, price_overridden_at)
 		SELECT l.id::uuid, $1, l.line_no, l.product_id::uuid, l.variant_id::uuid, l.product_name, l.variant_name,
 		       l.category_id::uuid, l.category_name, l.unit_price, l.unit_cost, l.quantity, l.fulfillment_type,
-		       l.line_total, l.note, $2, $3
+		       l.line_total, l.note, $2::uuid, $3::timestamptz,
+		       l.dtype, l.dvalue, l.dreason, CASE WHEN l.dtype IS NULL THEN NULL ELSE $2::uuid END,
+		       l.dapprover::uuid, CASE WHEN l.dtype IS NULL THEN NULL ELSE $3::timestamptz END, l.damount, l.share,
+		       l.original, l.oreason, CASE WHEN l.original IS NULL THEN NULL ELSE $2::uuid END,
+		       l.oapprover::uuid, CASE WHEN l.original IS NULL THEN NULL ELSE $3::timestamptz END
 		FROM unnest($4::text[], $5::int[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
-		            $11::text[], $12::bigint[], $13::bigint[], $14::int[], $15::text[], $16::bigint[], $17::text[])
+		            $11::text[], $12::bigint[], $13::bigint[], $14::int[], $15::text[], $16::bigint[], $17::text[],
+		            $18::text[], $19::bigint[], $20::text[], $21::text[], $22::bigint[], $23::bigint[],
+		            $24::bigint[], $25::text[], $26::text[])
 		  AS l(id, line_no, product_id, variant_id, product_name, variant_name, category_id, category_name,
-		       unit_price, unit_cost, quantity, fulfillment_type, line_total, note)`
+		       unit_price, unit_cost, quantity, fulfillment_type, line_total, note,
+		       dtype, dvalue, dreason, dapprover, damount, share, original, oreason, oapprover)`
 
 	insertModifiers = `
 		INSERT INTO order_line_modifiers (id, order_line_id, modifier_id, modifier_name, price_delta)
@@ -65,15 +85,38 @@ const (
 		                        value_delta, reason, after, approved_by, created_at)
 		VALUES ($1, $2, $3, 'staff', $4, 'order', $5, $6, $7, $8, $3, $9)`
 
+	// Control audit rows name their own approver (pos-controls FR-CAUD-1),
+	// all in one statement.
+	insertAudits = `
+		INSERT INTO audit_logs (id, outlet_id, actor_id, actor_type, action, entity_type, entity_id,
+		                        value_delta, reason, before, after, approved_by, created_at)
+		SELECT a.id::uuid, $1, $2, 'staff', a.action, 'order', $3, a.delta, a.reason, a.before::jsonb,
+		       a.after::jsonb, a.approver::uuid, $4
+		FROM unnest($5::text[], $6::text[], $7::bigint[], $8::text[], $9::text[], $10::text[], $11::text[])
+		  AS a(id, action, delta, reason, before, after, approver)`
+
 	// Every change takes the order row first (FR-ORD-6).
 	lockOrder = `
-		SELECT status, paid_at IS NOT NULL, order_number, grand_total
+		SELECT status, paid_at IS NOT NULL, order_number, grand_total, discount_type, discount_value,
+		       discount_total
 		FROM orders WHERE id = $1 AND outlet_id = $2 FOR UPDATE`
 
 	linesByID     = `SELECT id::text, order_id::text FROM order_lines WHERE id = ANY($1::uuid[])`
 	lastLineNo    = `SELECT count(*), coalesce(max(line_no), 0) FROM order_lines WHERE order_id = $1`
-	lineTotals    = `SELECT line_total, fulfillment_type, status FROM order_lines WHERE order_id = $1`
 	activeLineNum = `SELECT count(*) FROM order_lines WHERE order_id = $1 AND status = 'active'`
+
+	// What a recompute needs from every line, with its stored amounts.
+	storedLines = `
+		SELECT id::text, line_no, unit_price, quantity, discount_type, discount_value, fulfillment_type, status,
+		       original_unit_price, product_name, discount_amount, line_total, order_discount_share
+		FROM order_lines WHERE order_id = $1 ORDER BY line_no`
+
+	// Every line whose amounts changed, in one statement (NFR-PERF-2).
+	updateLineAmounts = `
+		UPDATE order_lines l
+		SET discount_amount = v.amount, line_total = v.total, order_discount_share = v.share
+		FROM unnest($1::uuid[], $2::bigint[], $3::bigint[], $4::bigint[]) AS v(id, amount, total, share)
+		WHERE l.id = v.id`
 
 	updateTotals = `
 		UPDATE orders
@@ -123,6 +166,9 @@ type write struct {
 type placeWrite struct {
 	write
 	in *PlaceInput
+	// stepUp is the first failed approval of the request's controls,
+	// returned only when the order is new (pos-controls FR-STP-6).
+	stepUp error
 }
 
 // Place writes a new order, or returns the stored one for a retry of its ID
@@ -191,21 +237,37 @@ func placeNew(ctx context.Context, tx pgx.Tx, w *placeWrite) (*Detail, error) {
 	if err != nil {
 		return nil, err
 	}
-	var prefix string
-	if err := tx.QueryRow(ctx, shiftPrefix, sh.ID, shift.PrefixWeb).Scan(&prefix); err != nil {
-		return nil, fmt.Errorf("get order prefix: %w", err)
+	// Controls count only on lines that can be sold (pos-controls FR-PLA-4),
+	// and are all checked before a number is taken (FR-PLA-3).
+	if w.stepUp != nil {
+		return nil, w.stepUp
 	}
-	seq, number, err := shift.NextNumber(ctx, tx, sh.ID, prefix)
+	rule := in.Discount.rule()
+	t, err := computeTotals(pricedTotals(priced, 1), rule)
 	if err != nil {
 		return nil, err
 	}
-	t := computeTotals(pricedTotals(priced))
+	if err := checkOrderDiscount(rule, t.Subtotal); err != nil {
+		return nil, err
+	}
+	prefix, seq, number, err := nextNumber(ctx, tx, sh.ID)
+	if err != nil {
+		return nil, err
+	}
+	dType, dValue := ruleColumns(rule)
+	var dReason, dApprover *string
+	if d := in.Discount; d != nil {
+		dReason, dApprover = &d.Reason, &d.approver
+	}
 	if _, err := tx.Exec(ctx, insertOrder, in.ID, in.OutletID, sh.ID, in.DeviceID, prefix, seq, number,
-		t.FulfillmentSummary, in.TableNumber, in.Note, t.Subtotal, t.GrandTotal, sh.BusinessDate,
-		w.at, w.actorID); err != nil {
+		t.FulfillmentSummary, in.TableNumber, in.Note, t.Subtotal, t.DiscountTotal, t.GrandTotal, sh.BusinessDate,
+		w.at, w.actorID, dType, dValue, dReason, dApprover); err != nil {
 		return nil, fmt.Errorf("insert order: %w", err)
 	}
-	if err := insertPriced(ctx, tx, in.ID, 1, priced, &w.write); err != nil {
+	if err := insertPriced(ctx, tx, in.ID, 1, priced, t.Lines, &w.write); err != nil {
+		return nil, err
+	}
+	if err := writeAudits(ctx, tx, in.OutletID, in.ID, placementAudits(in, priced, &t, number), &w.write); err != nil {
 		return nil, err
 	}
 	if err := writeEvent(ctx, tx, in.ID, nil, StatusPlaced, nil, &w.write); err != nil {
@@ -214,38 +276,63 @@ func placeNew(ctx context.Context, tx pgx.Tx, w *placeWrite) (*Detail, error) {
 	return loadDetail(ctx, tx, in.ID, in.OutletID)
 }
 
-func pricedTotals(priced []pricedLine) []totalsLine {
+// nextNumber takes the shift's next counter number, under the prefix its
+// sequences were created with.
+func nextNumber(ctx context.Context, tx pgx.Tx, shiftID string) (string, int, string, error) {
+	var prefix string
+	if err := tx.QueryRow(ctx, shiftPrefix, shiftID, shift.PrefixWeb).Scan(&prefix); err != nil {
+		return "", 0, "", fmt.Errorf("get order prefix: %w", err)
+	}
+	seq, number, err := shift.NextNumber(ctx, tx, shiftID, prefix)
+	return prefix, seq, number, err
+}
+
+// placementAudits are the audit rows of a new order's controls: the
+// lines' first, then the order discount measured against the subtotal
+// (FR-CAUD-1).
+func placementAudits(in *PlaceInput, priced []pricedLine, t *Totals, number string) []controlAudit {
+	audits := lineAudits(priced, t.Lines, number)
+	if d := in.Discount; d != nil {
+		audits = append(audits, controlAudit{action: "order.discount", valueDelta: -t.DiscountTotal,
+			reason: &d.Reason, approver: d.approver,
+			after: withLabels(orderDiscountState(d.rule(), t.DiscountTotal), number, "")})
+	}
+	return audits
+}
+
+// ruleColumns are a discount's type and value columns, null when there is
+// none.
+func ruleColumns(r *discountRule) (*string, *int64) {
+	if r == nil {
+		return nil, nil
+	}
+	return &r.Type, &r.Value
+}
+
+// pricedTotals is the totals' view of new lines numbered from firstNo.
+func pricedTotals(priced []pricedLine, firstNo int) []totalsLine {
 	lines := make([]totalsLine, len(priced))
 	for i, p := range priced {
-		lines[i] = totalsLine{LineTotal: p.lineTotal, FulfillmentType: p.in.FulfillmentType, Status: LineActive}
+		lines[i] = totalsLine{ID: p.in.ID, LineNo: firstNo + i, UnitPrice: p.unitPrice(), Quantity: p.in.Quantity,
+			Discount: p.in.Discount.rule(), FulfillmentType: p.in.FulfillmentType, Status: LineActive}
 	}
 	return lines
 }
 
 // insertPriced writes the lines, numbered from firstNo in request order,
-// and their modifiers.
-func insertPriced(ctx context.Context, tx pgx.Tx, orderID string, firstNo int, priced []pricedLine, w *write) error {
-	n := len(priced)
-	ids, products, names, categories, categoryNames, fulfillment := make([]string, n), make([]string, n),
-		make([]string, n), make([]string, n), make([]string, n), make([]string, n)
-	variants, variantNames, notes := make([]*string, n), make([]*string, n), make([]*string, n)
-	lineNos, quantities := make([]int32, n), make([]int32, n)
-	prices, totals, costs := make([]int64, n), make([]int64, n), make([]*int64, n)
+// with their computed amounts and controls, and their modifiers.
+func insertPriced(ctx context.Context, tx pgx.Tx, orderID string, firstNo int, priced []pricedLine,
+	amounts []lineAmounts, w *write) error {
+	c := newLineColumns(len(priced))
 	var mods modifierRows
 	for i, p := range priced {
-		ids[i], lineNos[i], quantities[i] = p.in.ID, int32(firstNo+i), int32(p.in.Quantity)
-		products[i], names[i] = p.snap.ProductID.String(), p.snap.ProductName
-		categories[i], categoryNames[i] = p.snap.CategoryID.String(), p.snap.CategoryName
-		variantNames[i], prices[i], costs[i], totals[i] = p.snap.VariantName, p.snap.UnitPrice, p.snap.UnitCost, p.lineTotal
-		fulfillment[i], notes[i] = p.in.FulfillmentType, p.in.Note
-		if p.snap.VariantID != nil {
-			v := p.snap.VariantID.String()
-			variants[i] = &v
-		}
+		c.add(i, firstNo+i, p, amounts[i])
 		mods.add(p)
 	}
-	if _, err := tx.Exec(ctx, insertLines, orderID, w.actorID, w.at, ids, lineNos, products, variants, names,
-		variantNames, categories, categoryNames, prices, costs, quantities, fulfillment, totals, notes); err != nil {
+	if _, err := tx.Exec(ctx, insertLines, orderID, w.actorID, w.at, c.ids, c.lineNos, c.products, c.variants,
+		c.names, c.variantNames, c.categories, c.categoryNames, c.prices, c.costs, c.quantities, c.fulfillment,
+		c.totals, c.notes, c.dTypes, c.dValues, c.dReasons, c.dApprovers, c.dAmounts, c.shares, c.originals,
+		c.oReasons, c.oApprovers); err != nil {
 		return fmt.Errorf("insert order lines: %w", err)
 	}
 	if len(mods.ids) == 0 {
@@ -256,6 +343,47 @@ func insertPriced(ctx context.Context, tx pgx.Tx, orderID string, firstNo int, p
 		return fmt.Errorf("insert order line modifiers: %w", err)
 	}
 	return nil
+}
+
+// lineColumns collects new lines as columns for one insert.
+type lineColumns struct {
+	ids, products, names, categories, categoryNames, fulfillment []string
+	variants, variantNames, notes, dTypes, dReasons, dApprovers  []*string
+	oReasons, oApprovers                                         []*string
+	lineNos, quantities                                          []int32
+	prices, totals, dAmounts, shares                             []int64
+	costs, dValues, originals                                    []*int64
+}
+
+func newLineColumns(n int) *lineColumns {
+	str, ptr := func() []string { return make([]string, n) }, func() []*string { return make([]*string, n) }
+	num, opt := func() []int64 { return make([]int64, n) }, func() []*int64 { return make([]*int64, n) }
+	return &lineColumns{
+		ids: str(), products: str(), names: str(), categories: str(), categoryNames: str(), fulfillment: str(),
+		variants: ptr(), variantNames: ptr(), notes: ptr(), dTypes: ptr(), dReasons: ptr(), dApprovers: ptr(),
+		oReasons: ptr(), oApprovers: ptr(), lineNos: make([]int32, n), quantities: make([]int32, n),
+		prices: num(), totals: num(), dAmounts: num(), shares: num(), costs: opt(), dValues: opt(), originals: opt(),
+	}
+}
+
+func (c *lineColumns) add(i, lineNo int, p pricedLine, a lineAmounts) {
+	c.ids[i], c.lineNos[i], c.quantities[i] = p.in.ID, int32(lineNo), int32(p.in.Quantity)
+	c.products[i], c.names[i] = p.snap.ProductID.String(), p.snap.ProductName
+	c.categories[i], c.categoryNames[i] = p.snap.CategoryID.String(), p.snap.CategoryName
+	c.variantNames[i], c.prices[i], c.costs[i] = p.snap.VariantName, p.unitPrice(), p.snap.UnitCost
+	c.fulfillment[i], c.notes[i] = p.in.FulfillmentType, p.in.Note
+	c.totals[i], c.dAmounts[i], c.shares[i] = a.LineTotal, a.DiscountAmount, a.Share
+	if p.snap.VariantID != nil {
+		v := p.snap.VariantID.String()
+		c.variants[i] = &v
+	}
+	if d := p.in.Discount; d != nil {
+		c.dTypes[i], c.dValues[i], c.dReasons[i], c.dApprovers[i] = &d.Type, &d.Value, &d.Reason, &d.approver
+	}
+	if o := p.in.Override; o != nil {
+		original := p.snap.UnitPrice
+		c.originals[i], c.oReasons[i], c.oApprovers[i] = &original, &o.Reason, &o.approver
+	}
 }
 
 // modifierRows collects modifier snapshots as columns for one insert.
@@ -286,23 +414,27 @@ func writeEvent(ctx context.Context, tx pgx.Tx, orderID string, from *string, to
 // eventPayload is an outbox payload (FR-EVT-2). Consumers read the rest
 // from the order.
 type eventPayload struct {
-	V            int      `json:"v"`
-	OrderID      string   `json:"order_id"`
-	OutletID     string   `json:"outlet_id"`
-	ShiftID      string   `json:"shift_id"`
-	BusinessDate string   `json:"business_date"`
-	Channel      string   `json:"channel"`
-	OrderNumber  string   `json:"order_number"`
-	Status       string   `json:"status"`
-	GrandTotal   int64    `json:"grand_total"`
-	LineIDs      []string `json:"line_ids,omitempty"`
+	V            int       `json:"v"`
+	OrderID      string    `json:"order_id"`
+	OutletID     string    `json:"outlet_id"`
+	ShiftID      string    `json:"shift_id"`
+	BusinessDate string    `json:"business_date"`
+	Channel      string    `json:"channel"`
+	OrderNumber  string    `json:"order_number"`
+	Status       string    `json:"status"`
+	GrandTotal   int64     `json:"grand_total"`
+	LineIDs      *[]string `json:"line_ids,omitempty"`
 }
 
 // writeOutbox records an order event for a future worker, from the order
 // as it stands after the change (FR-EVT-1).
 func writeOutbox(ctx context.Context, tx pgx.Tx, event string, d *Order, lineIDs []string, at time.Time) error {
 	p := eventPayload{V: 1, OrderID: d.ID, OutletID: d.OutletID, ShiftID: d.ShiftID, BusinessDate: d.BusinessDate,
-		Channel: d.Channel, OrderNumber: d.OrderNumber, Status: d.Status, GrandTotal: d.GrandTotal, LineIDs: lineIDs}
+		Channel: d.Channel, OrderNumber: d.OrderNumber, Status: d.Status, GrandTotal: d.GrandTotal}
+	// nil leaves line_ids out; an empty list is sent as [] (FR-OPN-7).
+	if lineIDs != nil {
+		p.LineIDs = &lineIDs
+	}
 	if _, err := tx.Exec(ctx, insertOutbox, uuid.NewString(), d.ID, event, p, at); err != nil {
 		return fmt.Errorf("insert outbox event: %w", err)
 	}
@@ -325,23 +457,80 @@ func writeAudit(ctx context.Context, tx pgx.Tx, a *auditEntry, w *write) error {
 	return nil
 }
 
+// controlAudit is one audit_logs row for a control (pos-controls
+// FR-CAUD-1). before and after are nil when there is no such state.
+type controlAudit struct {
+	action        string
+	valueDelta    int64
+	reason        *string
+	before, after map[string]any
+	approver      string
+}
+
+// writeAudits writes control audit rows in one statement.
+func writeAudits(ctx context.Context, tx pgx.Tx, outletID, orderID string, audits []controlAudit, w *write) error {
+	if len(audits) == 0 {
+		return nil
+	}
+	n := len(audits)
+	ids, actions, approvers := make([]string, n), make([]string, n), make([]string, n)
+	deltas := make([]int64, n)
+	reasons, befores, afters := make([]*string, n), make([]*string, n), make([]*string, n)
+	for i, a := range audits {
+		ids[i], actions[i], approvers[i], deltas[i], reasons[i] = uuid.NewString(), a.action, a.approver,
+			a.valueDelta, a.reason
+		var err error
+		if befores[i], err = jsonOrNil(a.before); err != nil {
+			return err
+		}
+		if afters[i], err = jsonOrNil(a.after); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, insertAudits, outletID, w.actorID, orderID, w.at, ids, actions, deltas, reasons,
+		befores, afters, approvers); err != nil {
+		return fmt.Errorf("insert audit logs: %w", err)
+	}
+	return nil
+}
+
+func jsonOrNil(m map[string]any) (*string, error) {
+	if m == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("encode audit state: %w", err)
+	}
+	s := string(b)
+	return &s, nil
+}
+
 // lockedOrder is the order row as a change sees it, under FOR UPDATE.
 type lockedOrder struct {
-	status      string
-	paid        bool
-	orderNumber string
-	grandTotal  int64
+	status        string
+	paid          bool
+	orderNumber   string
+	grandTotal    int64
+	discount      *discountRule
+	discountTotal int64
 }
 
 // lock takes the order row, or not_found for an order of another outlet.
 func lock(ctx context.Context, tx pgx.Tx, orderID, outletID string) (*lockedOrder, error) {
 	var o lockedOrder
-	err := tx.QueryRow(ctx, lockOrder, orderID, outletID).Scan(&o.status, &o.paid, &o.orderNumber, &o.grandTotal)
+	var dType *string
+	var dValue *int64
+	err := tx.QueryRow(ctx, lockOrder, orderID, outletID).Scan(&o.status, &o.paid, &o.orderNumber, &o.grandTotal,
+		&dType, &dValue, &o.discountTotal)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock order: %w", err)
+	}
+	if dType != nil && dValue != nil {
+		o.discount = &discountRule{Type: *dType, Value: *dValue}
 	}
 	return &o, nil
 }
@@ -356,18 +545,81 @@ func notOpen(status string) error {
 	}
 }
 
-// recomputeTotals stores the totals of the order's active lines
-// (FR-TOT-5). Existing snapshots are never re-priced.
-func recomputeTotals(ctx context.Context, tx pgx.Tx, orderID string, at time.Time) error {
-	rows, err := tx.Query(ctx, lineTotals, orderID)
+// storedLine is a line as a recompute reads it, with its stored amounts.
+type storedLine struct {
+	totalsLine
+	original    *int64
+	productName string
+	stored      lineAmounts
+}
+
+func loadStoredLines(ctx context.Context, tx pgx.Tx, orderID string) ([]storedLine, error) {
+	rows, err := tx.Query(ctx, storedLines, orderID)
 	if err != nil {
-		return fmt.Errorf("get line totals: %w", err)
+		return nil, fmt.Errorf("get order lines: %w", err)
 	}
-	lines, err := pgx.CollectRows(rows, pgx.RowToStructByPos[totalsLine])
+	defer rows.Close()
+	var lines []storedLine
+	for rows.Next() {
+		var l storedLine
+		var dType *string
+		var dValue *int64
+		if err := rows.Scan(&l.ID, &l.LineNo, &l.UnitPrice, &l.Quantity, &dType, &dValue, &l.FulfillmentType,
+			&l.Status, &l.original, &l.productName, &l.stored.DiscountAmount, &l.stored.LineTotal,
+			&l.stored.Share); err != nil {
+			return nil, fmt.Errorf("scan order line: %w", err)
+		}
+		if dType != nil && dValue != nil {
+			l.Discount = &discountRule{Type: *dType, Value: *dValue}
+		}
+		lines = append(lines, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read order lines: %w", err)
+	}
+	return lines, nil
+}
+
+func totalsOf(lines []storedLine) []totalsLine {
+	out := make([]totalsLine, len(lines))
+	for i := range lines {
+		out[i] = lines[i].totalsLine
+	}
+	return out
+}
+
+// recompute recalculates and stores every line's amounts and the order's
+// totals after lines were added or voided (pos-controls FR-TOT-14).
+// Existing snapshots are never re-priced (FR-TOT-5).
+func recompute(ctx context.Context, tx pgx.Tx, orderID string, discount *discountRule, at time.Time) error {
+	lines, err := loadStoredLines(ctx, tx, orderID)
 	if err != nil {
-		return fmt.Errorf("read line totals: %w", err)
+		return err
 	}
-	t := computeTotals(lines)
+	t, err := computeTotals(totalsOf(lines), discount)
+	if err != nil {
+		return err
+	}
+	return storeTotals(ctx, tx, orderID, lines, &t, at)
+}
+
+// storeTotals writes the amounts of the lines that changed, in one
+// statement, and the order's totals.
+func storeTotals(ctx context.Context, tx pgx.Tx, orderID string, lines []storedLine, t *Totals,
+	at time.Time) error {
+	var ids []string
+	var amounts, totals, shares []int64
+	for i, l := range lines {
+		if a := t.Lines[i]; a != l.stored {
+			ids, amounts, totals, shares = append(ids, l.ID), append(amounts, a.DiscountAmount),
+				append(totals, a.LineTotal), append(shares, a.Share)
+		}
+	}
+	if len(ids) > 0 {
+		if _, err := tx.Exec(ctx, updateLineAmounts, ids, amounts, totals, shares); err != nil {
+			return fmt.Errorf("update line amounts: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, updateTotals, orderID, t.Subtotal, t.DiscountTotal, t.ServiceCharge,
 		t.PackagingFee, t.TaxTotal, t.GrandTotal, t.FulfillmentSummary, at); err != nil {
 		return fmt.Errorf("update order totals: %w", err)

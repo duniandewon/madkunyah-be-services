@@ -1,6 +1,7 @@
 package order
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -20,9 +21,12 @@ import (
 
 type Handler struct {
 	svc *Service
+	// priceMax is CATALOG_PRICE_MAX, the bound on a fixed discount and an
+	// override (pos-controls FR-CTL-1, FR-CTL-2).
+	priceMax int64
 }
 
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+func NewHandler(svc *Service, priceMax int64) *Handler { return &Handler{svc: svc, priceMax: priceMax} }
 
 const errUnavailable = "Orders are temporarily unavailable. Try again with the same IDs."
 
@@ -85,17 +89,24 @@ type lineInput struct {
 	Quantity        int      `json:"quantity" validate:"min=1,max=999"`
 	FulfillmentType string   `json:"fulfillment_type" validate:"required,oneof=dine_in takeaway"`
 	Note            *string  `json:"note" validate:"omitempty,max=280"`
+	// Controls are validated on their own (validControls).
+	Discount      *discountInput `json:"discount" validate:"-"`
+	PriceOverride *overrideInput `json:"price_override" validate:"-"`
 }
 
 type placeInput struct {
-	ID          string      `json:"id" validate:"required,uuid"`
-	TableNumber *string     `json:"table_number" validate:"omitempty,max=20"`
-	Note        *string     `json:"note" validate:"omitempty,max=280"`
-	Lines       []lineInput `json:"lines" validate:"required,min=1,max=100"`
+	ID          string         `json:"id" validate:"required,uuid"`
+	TableNumber *string        `json:"table_number" validate:"omitempty,max=20"`
+	Note        *string        `json:"note" validate:"omitempty,max=280"`
+	Lines       []lineInput    `json:"lines" validate:"required,min=1,max=100"`
+	Discount    *discountInput `json:"discount" validate:"-"`
 }
 
 type addLinesInput struct {
 	Lines []lineInput `json:"lines" validate:"required,min=1,max=100"`
+	// Discount is refused with a pointer to the order discount route
+	// (pos-controls FR-PLA-2), rather than as an unknown field.
+	Discount json.RawMessage `json:"discount" validate:"-"`
 }
 
 type reasonInput struct {
@@ -110,14 +121,15 @@ type paymentInput struct {
 }
 
 // validLines validates each line, reporting fields as lines[i].field, and
-// converts them (FR-PLC-2).
-func validLines(in []lineInput) ([]LineInput, error) {
-	bad := map[string]string{}
+// converts them (FR-PLC-2). bad collects the problems of the whole request.
+func (h *Handler) validLines(in []lineInput, bad map[string]string) []LineInput {
 	out := make([]LineInput, len(in))
 	for i := range in {
 		l := &in[i]
+		prefix := "lines[" + strconv.Itoa(i) + "]."
+		out[i].Discount = h.validDiscount(prefix+"discount", l.Discount, bad)
+		out[i].Override = h.validOverride(prefix+"price_override", l.PriceOverride, bad)
 		if err := httpx.Validate(l); err != nil {
-			prefix := "lines[" + strconv.Itoa(i) + "]."
 			for f, msg := range domain.AsError(err).Fields {
 				bad[prefix+f] = msg
 			}
@@ -126,6 +138,7 @@ func validLines(in []lineInput) ([]LineInput, error) {
 		out[i] = LineInput{
 			ID: canonical(l.ID), ProductID: uuid.MustParse(l.ProductID), Quantity: l.Quantity,
 			FulfillmentType: l.FulfillmentType, Note: l.Note, ModifierIDs: make([]uuid.UUID, len(l.ModifierIDs)),
+			Discount: out[i].Discount, Override: out[i].Override,
 		}
 		if l.VariantID != nil {
 			v := uuid.MustParse(*l.VariantID)
@@ -135,10 +148,15 @@ func validLines(in []lineInput) ([]LineInput, error) {
 			out[i].ModifierIDs[j] = uuid.MustParse(m)
 		}
 	}
+	return out
+}
+
+// invalid is the validation error for bad, or nil when there is nothing.
+func invalid(bad map[string]string) error {
 	if len(bad) > 0 {
-		return nil, domain.ValidationError(bad)
+		return domain.ValidationError(bad)
 	}
-	return out, nil
+	return nil
 }
 
 // canonical lower-cases a validated UUID, so one ID has one spelling.
@@ -165,13 +183,16 @@ func (h *Handler) POSPlace(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	lines, err := validLines(in.Lines)
-	if err != nil {
+	bad := map[string]string{}
+	lines := h.validLines(in.Lines, bad)
+	discount := h.validDiscount("discount", in.Discount, bad)
+	if err := invalid(bad); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}
 	res, err := h.svc.Place(r.Context(), &PlaceInput{
 		Actor: actor(r), ID: canonical(in.ID), TableNumber: in.TableNumber, Note: in.Note, Lines: lines,
+		Discount: discount,
 	})
 	respond(w, r, created(res, err), res, err)
 }
@@ -187,8 +208,12 @@ func (h *Handler) POSAddLines(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	lines, err := validLines(in.Lines)
-	if err != nil {
+	bad := map[string]string{}
+	lines := h.validLines(in.Lines, bad)
+	if in.Discount != nil {
+		bad["discount"] = "is not accepted when adding lines; use PUT /v1/pos/orders/{order_id}/discount"
+	}
+	if err := invalid(bad); err != nil {
 		httpx.Error(w, r, err)
 		return
 	}

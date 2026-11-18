@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/duniandewon/madkunyah-be-service/internal/authz"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/google/uuid"
 )
@@ -25,6 +26,7 @@ type repository interface {
 	VoidLine(ctx context.Context, w *voidWrite) (*Detail, bool, error)
 	Cancel(ctx context.Context, w *cancelWrite) (*Detail, bool, error)
 	Pay(ctx context.Context, w *payWrite) (*Detail, bool, error)
+	Control(ctx context.Context, w *controlWrite) (*Detail, bool, error)
 	Get(ctx context.Context, outletID, orderID string) (*Detail, error)
 	List(ctx context.Context, f *ListFilter) ([]Order, error)
 	OpenShiftID(ctx context.Context, outletID string) (string, error)
@@ -32,12 +34,15 @@ type repository interface {
 }
 
 type Service struct {
-	repo repository
-	now  func() time.Time
+	repo   repository
+	access authz.AccessSource
+	now    func() time.Time
 }
 
-func NewService(repo repository) *Service {
-	return &Service{repo: repo, now: time.Now}
+// NewService takes the access source used to check step-up approvers
+// (pos-controls FR-STP-1).
+func NewService(repo repository, access authz.AccessSource) *Service {
+	return &Service{repo: repo, access: access, now: time.Now}
 }
 
 // at is the server time of a change, at the database's precision, so what
@@ -61,7 +66,13 @@ func (s *Service) Place(ctx context.Context, in *PlaceInput) (*Result, error) {
 	if err := checkLineIDs(in.Lines); err != nil {
 		return nil, err
 	}
-	d, applied, err := s.repo.Place(ctx, &placeWrite{write: write{at: s.at(), actorID: in.Acting.StaffID}, in: in})
+	w := &placeWrite{write: write{at: s.at(), actorID: in.Acting.StaffID}, in: in}
+	ap := s.newApprovals(&in.Actor)
+	w.stepUp = approveLines(ctx, ap, in.Lines)
+	if w.stepUp == nil && in.Discount != nil {
+		in.Discount.approver, w.stepUp = ap.approve(ctx, domain.PermOrderDiscount, in.Discount.ApprovedBy)
+	}
+	d, applied, err := s.repo.Place(ctx, w)
 	return result(d, applied, err)
 }
 
@@ -73,7 +84,9 @@ func (s *Service) AddLines(ctx context.Context, in *AddLinesInput) (*Result, err
 	if err := checkLineIDs(in.Lines); err != nil {
 		return nil, err
 	}
-	d, applied, err := s.repo.AddLines(ctx, &addWrite{write: write{at: s.at(), actorID: in.Acting.StaffID}, in: in})
+	w := &addWrite{write: write{at: s.at(), actorID: in.Acting.StaffID}, in: in}
+	w.stepUp = approveLines(ctx, s.newApprovals(&in.Actor), in.Lines)
+	d, applied, err := s.repo.AddLines(ctx, w)
 	return result(d, applied, err)
 }
 
@@ -102,6 +115,103 @@ func (s *Service) Pay(ctx context.Context, in *PayInput) (*Result, error) {
 	}
 	d, applied, err := s.repo.Pay(ctx, &payWrite{write: write{at: s.at(), actorID: in.Acting.StaffID}, in: in})
 	return result(d, applied, err)
+}
+
+// SetOrderDiscount applies or replaces the order discount (FR-OPN-1).
+func (s *Service) SetOrderDiscount(ctx context.Context, in *ControlInput) (*Result, error) {
+	return s.control(ctx, in, controlOrderDiscount, domain.PermOrderDiscount, in.Discount.ApprovedBy)
+}
+
+// RemoveOrderDiscount removes the order discount; removing needs the same
+// permission as applying (FR-STP-3).
+func (s *Service) RemoveOrderDiscount(ctx context.Context, in *ControlInput) (*Result, error) {
+	return s.control(ctx, in, controlOrderDiscount, domain.PermOrderDiscount, in.ApprovedBy)
+}
+
+// SetLineDiscount applies or replaces a line's discount.
+func (s *Service) SetLineDiscount(ctx context.Context, in *ControlInput) (*Result, error) {
+	return s.control(ctx, in, controlLineDiscount, domain.PermOrderDiscount, in.Discount.ApprovedBy)
+}
+
+// RemoveLineDiscount removes a line's discount.
+func (s *Service) RemoveLineDiscount(ctx context.Context, in *ControlInput) (*Result, error) {
+	return s.control(ctx, in, controlLineDiscount, domain.PermOrderDiscount, in.ApprovedBy)
+}
+
+// SetPrice applies or replaces a line's price override.
+func (s *Service) SetPrice(ctx context.Context, in *ControlInput) (*Result, error) {
+	return s.control(ctx, in, controlPrice, domain.PermOrderPriceOverride, in.Override.ApprovedBy)
+}
+
+// RemovePrice restores a line's quoted price.
+func (s *Service) RemovePrice(ctx context.Context, in *ControlInput) (*Result, error) {
+	return s.control(ctx, in, controlPrice, domain.PermOrderPriceOverride, in.ApprovedBy)
+}
+
+// control checks the step-up before the transaction (FR-STP-5); the
+// repository returns a failure only once it knows the request changes
+// something, so a no-op answers without it (FR-STP-6).
+func (s *Service) control(ctx context.Context, in *ControlInput, kind controlKind, perm, approvedBy string) (*Result, error) {
+	if in.Acting == nil {
+		return nil, domain.ErrForbidden
+	}
+	w := &controlWrite{write: write{at: s.at(), actorID: in.Acting.StaffID}, in: in, kind: kind}
+	w.approver, w.stepUp = s.newApprovals(&in.Actor).approve(ctx, perm, approvedBy)
+	d, applied, err := s.repo.Control(ctx, w)
+	return result(d, applied, err)
+}
+
+// approveLines checks every control on the lines, one approval per control
+// (FR-STP-4), and records each approver. It returns the first failure.
+func approveLines(ctx context.Context, ap *approvals, lines []LineInput) error {
+	var err error
+	for i := range lines {
+		l := &lines[i]
+		if l.Override != nil {
+			if l.Override.approver, err = ap.approve(ctx, domain.PermOrderPriceOverride, l.Override.ApprovedBy); err != nil {
+				return err
+			}
+		}
+		if l.Discount != nil {
+			if l.Discount.approver, err = ap.approve(ctx, domain.PermOrderDiscount, l.Discount.ApprovedBy); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// approvals checks step-ups for one request, resolving each distinct
+// approver at most once (FR-STP-5).
+type approvals struct {
+	actor *Actor
+	src   *memoAccess
+}
+
+func (s *Service) newApprovals(a *Actor) *approvals {
+	return &approvals{actor: a, src: &memoAccess{src: s.access, seen: map[string]*domain.StaffAccess{}}}
+}
+
+func (p *approvals) approve(ctx context.Context, perm, approvedBy string) (string, error) {
+	return authz.Approver(ctx, p.src, p.actor.Acting, p.actor.OutletID, perm, approvedBy)
+}
+
+// memoAccess remembers each staff member's access for one request.
+type memoAccess struct {
+	src  authz.AccessSource
+	seen map[string]*domain.StaffAccess
+}
+
+func (m *memoAccess) Access(ctx context.Context, id string) (*domain.StaffAccess, error) {
+	if a, ok := m.seen[id]; ok {
+		return a, nil
+	}
+	a, err := m.src.Access(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	m.seen[id] = a
+	return a, nil
 }
 
 func result(d *Detail, applied bool, err error) (*Result, error) {

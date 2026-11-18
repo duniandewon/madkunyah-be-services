@@ -16,9 +16,13 @@ const (
 		SELECT o.id::text, o.outlet_id::text, o.shift_id::text, o.device_id::text, o.order_number, o.channel,
 		       o.status, o.fulfillment_summary, o.business_date::text, o.table_number, o.note,
 		       o.subtotal, o.discount_total, o.service_charge, o.packaging_fee, o.tax_total, o.grand_total,
-		       o.placed_at, o.paid_at, o.created_by::text, cb.full_name, o.created_at
+		       o.placed_at, o.paid_at, o.created_by::text, cb.full_name, o.created_at,
+		       o.discount_type, o.discount_value, o.discount_reason, o.discounted_by::text, db.full_name,
+		       o.discount_approved_by::text, da.full_name, o.discounted_at
 		FROM orders o
-		LEFT JOIN staff cb ON cb.id = o.created_by`
+		LEFT JOIN staff cb ON cb.id = o.created_by
+		LEFT JOIN staff db ON db.id = o.discounted_by
+		LEFT JOIN staff da ON da.id = o.discount_approved_by`
 
 	getOrder = selectOrder + ` WHERE o.id = $1 AND o.outlet_id = $2`
 
@@ -40,10 +44,18 @@ const (
 		SELECT l.id::text, l.product_id::text, l.product_variant_id::text, l.product_name, l.variant_name,
 		       l.category_id::text, l.category_name, l.unit_price, l.quantity, l.discount_amount, l.line_total,
 		       l.fulfillment_type, l.note, l.status, l.created_by::text, cb.full_name, l.created_at,
-		       l.voided_by::text, vb.full_name, l.voided_at, l.void_reason
+		       l.voided_by::text, vb.full_name, l.voided_at, l.void_reason, l.order_discount_share,
+		       l.discount_type, l.discount_value, l.discount_reason, l.discounted_by::text, db.full_name,
+		       l.discount_approved_by::text, da.full_name, l.discounted_at,
+		       l.original_unit_price, l.price_override_reason, l.price_overridden_by::text, ob.full_name,
+		       l.price_override_approved_by::text, oa.full_name, l.price_overridden_at
 		FROM order_lines l
 		LEFT JOIN staff cb ON cb.id = l.created_by
 		LEFT JOIN staff vb ON vb.id = l.voided_by
+		LEFT JOIN staff db ON db.id = l.discounted_by
+		LEFT JOIN staff da ON da.id = l.discount_approved_by
+		LEFT JOIN staff ob ON ob.id = l.price_overridden_by
+		LEFT JOIN staff oa ON oa.id = l.price_override_approved_by
 		WHERE l.order_id = $1
 		ORDER BY l.line_no`
 
@@ -156,17 +168,72 @@ func staffRef(id, name *string) *StaffRef {
 	return &StaffRef{ID: *id, Name: *name}
 }
 
+// stampColumns are who applied a control, who approved it, why and when,
+// in the order the read queries select them.
+type stampColumns struct {
+	reason, by, byName, approver, approverName *string
+	at                                         *time.Time
+}
+
+func (s *stampColumns) dest() []any {
+	return []any{&s.reason, &s.by, &s.byName, &s.approver, &s.approverName, &s.at}
+}
+
+func (s *stampColumns) set() bool { return s.reason != nil && s.at != nil }
+
+// discountColumns are a stored discount: type, value, then the stamp.
+type discountColumns struct {
+	dType *string
+	value *int64
+	stampColumns
+}
+
+func (c *discountColumns) dest() []any {
+	return append([]any{&c.dType, &c.value}, c.stampColumns.dest()...)
+}
+
+// discount is the stored discount, or nil when there is none.
+func (c *discountColumns) discount(amount int64) *AppliedDiscount {
+	if c.dType == nil || c.value == nil || !c.set() {
+		return nil
+	}
+	return &AppliedDiscount{Type: *c.dType, Value: *c.value, Amount: amount, Reason: *c.reason,
+		By: staffRef(c.by, c.byName), ApprovedBy: staffRef(c.approver, c.approverName), At: *c.at}
+}
+
+// overrideColumns are a stored price override: original_unit_price, then
+// the stamp.
+type overrideColumns struct {
+	original *int64
+	stampColumns
+}
+
+func (c *overrideColumns) dest() []any {
+	return append([]any{&c.original}, c.stampColumns.dest()...)
+}
+
+// override is the stored override, or nil when there is none.
+func (c *overrideColumns) override() *AppliedOverride {
+	if c.original == nil || !c.set() {
+		return nil
+	}
+	return &AppliedOverride{OriginalUnitPrice: *c.original, Reason: *c.reason, By: staffRef(c.by, c.byName),
+		ApprovedBy: staffRef(c.approver, c.approverName), At: *c.at}
+}
+
 func scanOrder(row rowScanner) (*Order, error) {
 	var o Order
 	var createdBy, createdByName *string
-	err := row.Scan(&o.ID, &o.OutletID, &o.ShiftID, &o.DeviceID, &o.OrderNumber, &o.Channel,
+	var d discountColumns
+	err := row.Scan(append([]any{&o.ID, &o.OutletID, &o.ShiftID, &o.DeviceID, &o.OrderNumber, &o.Channel,
 		&o.Status, &o.FulfillmentSummary, &o.BusinessDate, &o.TableNumber, &o.Note,
 		&o.Subtotal, &o.DiscountTotal, &o.ServiceCharge, &o.PackagingFee, &o.TaxTotal, &o.GrandTotal,
-		&o.PlacedAt, &o.PaidAt, &createdBy, &createdByName, &o.CreatedAt)
+		&o.PlacedAt, &o.PaidAt, &createdBy, &createdByName, &o.CreatedAt}, d.dest()...)...)
 	if err != nil {
 		return nil, err
 	}
 	o.CreatedBy = staffRef(createdBy, createdByName)
+	o.Discount = d.discount(o.DiscountTotal)
 	return &o, nil
 }
 
@@ -214,13 +281,18 @@ func loadLines(ctx context.Context, q shift.Querier, orderID string) ([]Line, er
 	for rows.Next() {
 		var l Line
 		var createdBy, createdByName, voidedBy, voidedByName *string
-		if err := rows.Scan(&l.ID, &l.ProductID, &l.VariantID, &l.ProductName, &l.VariantName,
+		var d discountColumns
+		var o overrideColumns
+		dest := []any{&l.ID, &l.ProductID, &l.VariantID, &l.ProductName, &l.VariantName,
 			&l.CategoryID, &l.CategoryName, &l.UnitPrice, &l.Quantity, &l.DiscountAmount, &l.LineTotal,
 			&l.FulfillmentType, &l.Note, &l.Status, &createdBy, &createdByName, &l.CreatedAt,
-			&voidedBy, &voidedByName, &l.VoidedAt, &l.VoidReason); err != nil {
+			&voidedBy, &voidedByName, &l.VoidedAt, &l.VoidReason, &l.OrderDiscountShare}
+		dest = append(append(dest, d.dest()...), o.dest()...)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("scan order line: %w", err)
 		}
 		l.CreatedBy, l.VoidedBy = staffRef(createdBy, createdByName), staffRef(voidedBy, voidedByName)
+		l.Discount, l.PriceOverride = d.discount(l.DiscountAmount), o.override()
 		l.Modifiers = []Modifier{}
 		index[l.ID] = len(lines)
 		lines = append(lines, l)

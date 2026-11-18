@@ -114,7 +114,7 @@ func run() error {
 		}, rdb)),
 		// Open bills block a shift close (orders FR-GRD).
 		Shifts: shift.NewHandler(shift.NewService(shift.NewRepository(db), access, order.Guard{})),
-		Orders: order.NewHandler(order.NewService(order.NewRepository(db))),
+		Orders: order.NewHandler(order.NewService(order.NewRepository(db), access), cfg.Catalog.PriceMax),
 	})
 
 	errCh := make(chan error, 1)

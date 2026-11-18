@@ -13,6 +13,9 @@ import (
 type addWrite struct {
 	write
 	in *AddLinesInput
+	// stepUp is the first failed approval of the lines' controls, returned
+	// only when the lines are new (pos-controls FR-STP-6).
+	stepUp error
 }
 
 type voidWrite struct {
@@ -78,10 +81,23 @@ func (r *Repository) AddLines(ctx context.Context, w *addWrite) (*Detail, bool, 
 		if err != nil {
 			return false, err
 		}
-		if err := insertPriced(ctx, tx, in.OrderID, last+1, priced, &w.write); err != nil {
+		if w.stepUp != nil {
+			return false, w.stepUp
+		}
+		// The new lines' own amounts; their order discount shares come
+		// with the recompute over the whole order (FR-INT-4).
+		own, err := computeTotals(pricedTotals(priced, last+1), nil)
+		if err != nil {
 			return false, err
 		}
-		if err := recomputeTotals(ctx, tx, in.OrderID, w.at); err != nil {
+		if err := insertPriced(ctx, tx, in.OrderID, last+1, priced, own.Lines, &w.write); err != nil {
+			return false, err
+		}
+		if err := recompute(ctx, tx, in.OrderID, o.discount, w.at); err != nil {
+			return false, err
+		}
+		if err := writeAudits(ctx, tx, in.OutletID, in.OrderID, lineAudits(priced, own.Lines, o.orderNumber),
+			&w.write); err != nil {
 			return false, err
 		}
 		return true, outboxAfter(ctx, tx, "order.updated", in.OrderID, in.OutletID, lineIDs(in.Lines), &w.write)
@@ -155,7 +171,9 @@ func (r *Repository) VoidLine(ctx context.Context, w *voidWrite) (*Detail, bool,
 		if _, err := tx.Exec(ctx, voidLine, in.LineID, w.actorID, w.at, in.Reason); err != nil {
 			return false, fmt.Errorf("void line: %w", err)
 		}
-		if err := recomputeTotals(ctx, tx, in.OrderID, w.at); err != nil {
+		// The order discount is reallocated over the remaining lines; the
+		// voided line keeps its controls (pos-controls FR-INT-1, FR-INT-2).
+		if err := recompute(ctx, tx, in.OrderID, o.discount, w.at); err != nil {
 			return false, err
 		}
 		if err := writeAudit(ctx, tx, &auditEntry{outletID: in.OutletID, orderID: in.OrderID,
