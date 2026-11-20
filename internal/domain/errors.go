@@ -54,6 +54,8 @@ const (
 
 	CodeLineNotActive        ErrorCode = "line_not_active"
 	CodeDiscountExceedsTotal ErrorCode = "discount_exceeds_total"
+
+	CodeOutletShiftOpen ErrorCode = "outlet_shift_open"
 )
 
 // Error is the single error type crossing service boundaries. The HTTP layer

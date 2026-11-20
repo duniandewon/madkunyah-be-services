@@ -16,6 +16,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/config"
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/order"
+	"github.com/duniandewon/madkunyah-be-service/internal/outlet"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/server"
 	"github.com/duniandewon/madkunyah-be-service/internal/shift"
@@ -113,8 +114,9 @@ func run() error {
 			CacheTTL: cfg.Catalog.CacheTTL,
 		}, rdb)),
 		// Open bills block a shift close (orders FR-GRD).
-		Shifts: shift.NewHandler(shift.NewService(shift.NewRepository(db), access, order.Guard{})),
-		Orders: order.NewHandler(order.NewService(order.NewRepository(db), access), cfg.Catalog.PriceMax),
+		Shifts:  shift.NewHandler(shift.NewService(shift.NewRepository(db), access, order.Guard{})),
+		Orders:  order.NewHandler(order.NewService(order.NewRepository(db), access), cfg.Catalog.PriceMax),
+		Outlets: outlet.NewHandler(outlet.NewService(outlet.NewRepository(db), rdb, authSvc)),
 	})
 
 	errCh := make(chan error, 1)

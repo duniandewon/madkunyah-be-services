@@ -1,20 +1,43 @@
-# Current Feature
+# Current Feature: Outlet Management
 
 <!-- Feature name and short description -->
+
+Owners create, edit, deactivate and reactivate outlets from the dashboard; staff read the outlets they can reach. Spec: `context/features/outlet-crud-spec.md`.
 
 ## Status
 
 <!-- Not started | In Progress | Completed -->
 
-Not Started
+In Progress
 
 ## Goals
 
 <!-- Goals and requirements -->
 
+- `POST /v1/outlets` creates an active outlet (server-generated ID, defaults `Asia/Jakarta` / `04:00` / `POS`), `201` (FR-OTL-1..3)
+- `GET /v1/outlets/{id}` for any role at the outlet, with `open_shift_id`; `GET /v1/staff/me/outlets` lists reachable outlets, inactive ones only for `outlet.manage` holders (FR-OTL-4..6)
+- `PATCH /v1/outlets/{id}`: absent keeps, `null` clears `address`/`phone` only, no-op = `200` with no audit (FR-OTL-7, FR-OTL-8)
+- Field rules: name 1–100 trimmed, address ≤ 500, phone ≤ 30, IANA timezone via `time.LoadLocation` (no `Local`/offsets) and Postgres `AT TIME ZONE` in the write transaction, cutoff `HH:MM`, prefix `^[A-Z0-9]{1,8}$` upper-cased, `WEB` refused; unknown fields refused (§3.1)
+- `timezone`/`business_day_cutoff` changes refused with `409 outlet_shift_open` + `details.shift_id` while a shift is open; `order_prefix` may change mid-shift and applies at the next open (FR-OTL-9, FR-OTL-10)
+- `POST …/deactivate` refused while a shift is open; marks active devices revoked in the same transaction, then revokes their sessions via `Revoker.RevokeDevice`; staff roles kept. `POST …/activate` does not restore devices. Both idempotent with `applied` (FR-OTL-13..17)
+- Menu/bundle cache generation bumped after committed changes to name, timezone, cutoff, and on (de)activation (FR-OTL-12, FR-OTL-18)
+- Shift open reads the outlet `FOR SHARE` so it serialises against updates and deactivation (FR-OTL-19)
+- Writes need `outlet.manage` through a global role (`RequireGlobalPermission`); 403 on a reachable outlet, 404 otherwise; 4 KB body cap (§3.7)
+- Audit rows `outlet.created`, `outlet.updated` (changed fields only), `outlet.deactivated` (with `devices_revoked`), `outlet.activated`; none for no-ops (§3.8)
+- Migration `0009_outlet_management`: CHECKs on name, prefix format, address and phone length (§7)
+- `domain.PermOutletManage`, `domain.CodeOutletShiftOpen` (409); new `internal/outlet` package
+- Tests: AC-1..AC-12 (integration on `madkunyah_test` with the race detector for AC-10, route walk, field-validation unit tests); golangci-lint clean
+
 ## Notes
 
 <!-- Any extra notes -->
+
+- Open questions (spec §9) taken with the recommended defaults unless changed: outlet names not unique; any valid IANA timezone; deactivation revokes devices; owner only edits (no manager edits).
+- Public `GET /v1/outlets` and `/menu` are unchanged; the dashboard list lives at `/v1/staff/me/outlets` because one route cannot be both public and authenticated.
+- `outlet.manage` is already seeded on the owner role (`0001_auth`); only the Go constant is new.
+- Existing inactive-outlet refusals (shift open, Quote, device enroll, menu, sold-out) already use `AND is_active`; nothing new needed there.
+- Deactivation revokes devices with its own by-outlet `UPDATE` (plus `device.revoked` audit rows, as single revocation writes) and ends sessions through `auth.Service.EndDeviceSessions`, the same `Revoker` path. `RequireActiveDevice` reads the device row, so the POS stops even if session revocation fails (log it).
+- Out of scope: `outlet_hours`, device management screens, tax/charge config, hard delete, custom roles.
 
 ## History
 

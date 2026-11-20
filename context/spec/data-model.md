@@ -19,7 +19,12 @@ CREATE TABLE outlets (
   phone               TEXT,
   is_active           BOOLEAN NOT NULL DEFAULT TRUE,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- 0009: the API's field rules (outlet-crud-spec §3.1).
+  CHECK (btrim(name) <> '' AND length(name) <= 100),
+  CHECK (order_prefix ~ '^[A-Z0-9]{1,8}$' AND order_prefix <> 'WEB'),
+  CHECK (length(address) <= 500),
+  CHECK (length(phone) <= 30)
 );
 
 CREATE TABLE outlet_hours (

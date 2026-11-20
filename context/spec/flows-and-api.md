@@ -148,7 +148,10 @@ GET    /v1/reports/shifts/{id}
 GET    /v1/outlets/{id}/shifts           GET /v1/outlets/{id}/shifts/{sid}
 GET    /v1/outlets/{id}/orders           GET /v1/outlets/{id}/orders/{oid}
 CRUD   /v1/products  /v1/categories  /v1/modifiers
-CRUD   /v1/staff     /v1/outlets     /v1/devices
+POST   /v1/outlets                       GET   /v1/outlets/{id}        PATCH /v1/outlets/{id}
+POST   /v1/outlets/{id}/deactivate       POST  /v1/outlets/{id}/activate
+GET    /v1/staff/me/outlets
+CRUD   /v1/staff     /v1/devices
 GET    /v1/inventory/stock               POST /v1/inventory/movements
 GET    /v1/audit-logs                    GET /v1/auth-events
 ```

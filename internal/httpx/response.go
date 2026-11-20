@@ -56,7 +56,7 @@ func statusFor(code domain.ErrorCode) int {
 		domain.CodeShiftAlreadyOpen, domain.CodeShiftUnfinishedOrder,
 		domain.CodeNoOpenShift, domain.CodeLinesUnavailable, domain.CodeOrderNotOpen,
 		domain.CodeLastActiveLine, domain.CodeAmountMismatch, domain.CodeOrderAlreadyPaid,
-		domain.CodeLineNotActive, domain.CodeDiscountExceedsTotal:
+		domain.CodeLineNotActive, domain.CodeDiscountExceedsTotal, domain.CodeOutletShiftOpen:
 		return http.StatusConflict
 	case domain.CodeRateLimited, domain.CodeOTPCooldown, domain.CodeOTPQuotaExceeded:
 		return http.StatusTooManyRequests

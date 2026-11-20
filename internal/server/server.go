@@ -11,6 +11,7 @@ import (
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
 	"github.com/duniandewon/madkunyah-be-service/internal/httpx"
 	"github.com/duniandewon/madkunyah-be-service/internal/order"
+	"github.com/duniandewon/madkunyah-be-service/internal/outlet"
 	"github.com/duniandewon/madkunyah-be-service/internal/pos"
 	"github.com/duniandewon/madkunyah-be-service/internal/shift"
 	"github.com/duniandewon/madkunyah-be-service/internal/staff"
@@ -35,6 +36,7 @@ type Deps struct {
 	Catalog *catalog.Handler
 	Shifts  *shift.Handler
 	Orders  *order.Handler
+	Outlets *outlet.Handler
 }
 
 const (
@@ -102,6 +104,7 @@ func Router(d Deps) http.Handler {
 		r.Route("/staff", func(r chi.Router) {
 			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access))
 			r.Get("/me", d.Auth.Me)
+			r.Get("/me/outlets", d.Outlets.Mine)
 			r.Post("/me/pin", d.Staff.SetPIN)
 			r.Delete("/{staffID}/pin", d.Staff.ResetPIN)
 			r.Put("/{staffID}/global-roles/{role}", d.Staff.GrantGlobalRole)
@@ -133,6 +136,11 @@ func Router(d Deps) http.Handler {
 			r.Get("/outlets/{outletID}/shifts/{shiftID}", d.Shifts.Get)
 			r.Get("/outlets/{outletID}/orders", d.Orders.List)
 			r.Get("/outlets/{outletID}/orders/{orderID}", d.Orders.Get)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(authn(domain.AudienceStaff), mw.LoadStaffAccess(d.Access), mw.MaxBodyBytes(outletBodyLimit))
+			outletRoutes(r, d.Outlets)
 		})
 
 		// Public: the online shop browses without signing in.
@@ -196,6 +204,23 @@ func posOrderRoutes(r chi.Router, h *order.Handler) {
 	small.Delete("/orders/{orderID}/lines/{lineID}/discount", h.POSRemoveLineDiscount)
 	small.Put("/orders/{orderID}/lines/{lineID}/price", h.POSSetPrice)
 	small.Delete("/orders/{orderID}/lines/{lineID}/price", h.POSRemovePrice)
+}
+
+// outletBodyLimit caps outlet bodies, which carry six short fields
+// (outlet-crud-spec §3.7).
+const outletBodyLimit = 4 << 10
+
+// outletRoutes mounts outlet management. Writes need outlet.manage through
+// a global role; on an outlet the caller cannot reach they get 404 first.
+// The public GET /v1/outlets stays separate (FR-OTL-6).
+func outletRoutes(r chi.Router, h *outlet.Handler) {
+	manage := mw.RequireGlobalPermission(domain.PermOutletManage)
+	one := r.With(mw.RequireOutletRole)
+	r.With(manage).Post("/outlets", h.Create)
+	one.Get("/outlets/{outletID}", h.Get)
+	one.With(manage).Patch("/outlets/{outletID}", h.Update)
+	one.With(manage).Post("/outlets/{outletID}/deactivate", h.Deactivate)
+	one.With(manage).Post("/outlets/{outletID}/activate", h.Activate)
 }
 
 // compress gzips the menu and the POS bundle, the two large catalog

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/duniandewon/madkunyah-be-service/internal/domain"
@@ -201,6 +202,17 @@ func (s *Service) RevokeDevice(ctx context.Context, actor *domain.StaffAccess, d
 	if changed {
 		s.record(ctx, deviceEvent(DeviceRef{ID: deviceID, Fingerprint: fingerprint}, "session.revoked", meta))
 	}
+	return nil
+}
+
+// EndDeviceSessions ends the sessions of a device already marked revoked
+// elsewhere (outlet deactivation, outlet-crud-spec FR-OTL-14) and records
+// it, as RevokeDevice does for one device.
+func (s *Service) EndDeviceSessions(ctx context.Context, d DeviceRef, meta RequestMeta) error {
+	if err := s.deps.Revoker.RevokeDevice(ctx, d.ID); err != nil {
+		return fmt.Errorf("end device sessions: %w", err)
+	}
+	s.record(ctx, deviceEvent(d, "session.revoked", meta))
 	return nil
 }
 

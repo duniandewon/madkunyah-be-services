@@ -14,11 +14,15 @@ import (
 )
 
 const (
+	// FOR SHARE serialises an open against an outlet change or
+	// deactivation (outlet-crud-spec FR-OTL-19): either the open waits and
+	// reads the new values, or the change waits and sees the open shift.
 	openOutlet = `
 		SELECT timezone,
 		       (extract(hour FROM business_day_cutoff) * 60 + extract(minute FROM business_day_cutoff))::int,
 		       order_prefix
-		FROM outlets WHERE id = $1 AND is_active`
+		FROM outlets WHERE id = $1 AND is_active
+		FOR SHARE`
 
 	shiftByID = `SELECT outlet_id::text, status FROM shifts WHERE id = $1`
 

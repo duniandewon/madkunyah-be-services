@@ -82,3 +82,36 @@ func TestOrderRoutes(t *testing.T) {
 		}
 	}
 }
+
+// Outlet management is mounted next to the public outlet list without
+// replacing it (outlet-crud-spec FR-OTL-6, AC-12).
+func TestOutletRoutes(t *testing.T) {
+	routes := map[string]bool{}
+	router := Router(Deps{Config: &config.Config{}}).(chi.Routes)
+	err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		routes[method+" "+strings.TrimSuffix(route, "/")] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"POST /v1/outlets",
+		"GET /v1/outlets/{outletID}",
+		"PATCH /v1/outlets/{outletID}",
+		"POST /v1/outlets/{outletID}/deactivate",
+		"POST /v1/outlets/{outletID}/activate",
+		"GET /v1/staff/me/outlets",
+		"GET /v1/outlets",
+		"GET /v1/outlets/{outletID}/menu",
+	} {
+		if !routes[want] {
+			t.Errorf("route %q is not mounted", want)
+		}
+	}
+	for r := range routes {
+		if strings.HasPrefix(r, "DELETE /v1/outlets/{outletID}") && strings.Count(r, "/") == 3 {
+			t.Errorf("outlets can be deleted: %q", r)
+		}
+	}
+}

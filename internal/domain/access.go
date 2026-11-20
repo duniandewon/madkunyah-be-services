@@ -36,6 +36,9 @@ const (
 	// (pos-controls-spec FR-STP-1).
 	PermOrderDiscount      = "order.discount"
 	PermOrderPriceOverride = "order.price_override"
+	// Outlets are created and changed through a global role only: holding
+	// it at one outlet must not reach another (outlet-crud-spec §2).
+	PermOutletManage = "outlet.manage"
 )
 
 // AccessScope is the set of roles, and the permissions they carry, that a
